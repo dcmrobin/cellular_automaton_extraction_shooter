@@ -2,7 +2,9 @@ using UnityEngine;
 
 public class CAController : MonoBehaviour
 {
+    [Header("Target Renderer (Quad)")]
     public Renderer targetRenderer;
+
     [Header("Compute Shader")]
     public ComputeShader cellularAutomaton;
 
@@ -12,6 +14,10 @@ public class CAController : MonoBehaviour
 
     [Header("Simulation")]
     public float updateRate = 10f;
+
+    [Header("Decay Behaviour")]
+    [Tooltip("If enabled, decaying cells start at the lowest decay value and count UP toward the highest before dying, instead of starting high and counting DOWN.")]
+    public bool decayCountUp = false;
 
     [Header("Automaton Rules (Birth/Survival/Decay)")]
     public string rules = "3/23/0";
@@ -106,13 +112,10 @@ public class CAController : MonoBehaviour
 
         cellularAutomaton.SetVector(
             "AutomatonID",
-            new Vector4(
-                automatonID.x,
-                automatonID.y,
-                automatonID.z,
-                1
-            )
+            new Vector4(automatonID.x, automatonID.y, automatonID.z, 1)
         );
+
+        cellularAutomaton.SetInt("DecayCountUp", decayCountUp ? 1 : 0);
 
         SetRules();
     }

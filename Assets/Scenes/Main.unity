@@ -249,8 +249,9 @@ MonoBehaviour:
   width: 700
   height: 700
   updateRate: 50
-  rules: 3/23/1
-  automatonID: {x: 1, y: 0, z: 0}
+  decayCountUp: 1
+  rules: 278/3456/6
+  automatonID: {x: 0, y: 0, z: 1}
 --- !u!4 &775166574
 Transform:
   m_ObjectHideFlags: 0
