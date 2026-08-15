@@ -7,8 +7,8 @@ Texture2D<float4> Current;
 int Width;
 int Height;
 
-int BirthRules[9];
-int SurvivalRules[9];
+int BirthMask;
+int SurvivalMask;
 
 int Decay;
 
@@ -74,8 +74,8 @@ void Step(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    bool born = neighbours == 3;
-    bool survives = neighbours == 2 || neighbours == 3;
+    bool born = (BirthMask & (1 << neighbours)) != 0;
+    bool survives = (SurvivalMask & (1 << neighbours)) != 0;
 
     if (cell.a > 0.5)
     {
@@ -89,6 +89,24 @@ void Step(uint3 id : SV_DispatchThreadID)
         if (born)
             Result[pos] = float4(AutomatonID.rgb, 1.0);
         else
-            Result[pos] = float4(0, 0, 0, 0);
+        {
+            if (Decay <= 1)
+            {
+                Result[pos] = float4(0, 0, 0, 0);
+            }
+            else
+            {
+                float newAlpha = cell.a - (1.0 / (float)Decay);
+
+                if (newAlpha <= 0.0)
+                {
+                    Result[pos] = float4(0, 0, 0, 0);
+                }
+                else
+                {
+                    Result[pos] = float4(cell.rgb, newAlpha);
+                }
+            }
+        }
     }
 }

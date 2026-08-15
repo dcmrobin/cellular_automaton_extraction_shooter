@@ -50,35 +50,33 @@ public class CAController : MonoBehaviour
 
         if (parts.Length != 3)
         {
-            Debug.LogError(
-                "CA-REAPER: Rules must be formatted B/S/D, e.g. 3/23/1"
-            );
+            Debug.LogError("CA-REAPER: Invalid rule format! Use B/S/D");
             return;
         }
 
-        int[] birth = ParseRuleString(parts[0]);
-        int[] survival = ParseRuleString(parts[1]);
+        int birthMask = ParseRuleMask(parts[0]);
+        int survivalMask = ParseRuleMask(parts[1]);
 
-        cellularAutomaton.SetInts("BirthRules", birth);
-        cellularAutomaton.SetInts("SurvivalRules", survival);
+        cellularAutomaton.SetInt("BirthMask", birthMask);
+        cellularAutomaton.SetInt("SurvivalMask", survivalMask);
 
         cellularAutomaton.SetInt("Decay", int.Parse(parts[2]));
     }
 
-
-    int[] ParseRuleString(string rule)
+    int ParseRuleMask(string rule)
     {
-        int[] result = new int[9];
+        int mask = 0;
 
         foreach (char c in rule)
         {
             if (c >= '0' && c <= '8')
             {
-                result[c - '0'] = 1;
+                int number = c - '0';
+                mask |= (1 << number);
             }
         }
 
-        return result;
+        return mask;
     }
 
 
