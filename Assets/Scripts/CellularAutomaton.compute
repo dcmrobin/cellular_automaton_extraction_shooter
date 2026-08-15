@@ -7,13 +7,10 @@ Texture2D<float4> Current;
 int Width;
 int Height;
 
-int BirthMin;
-int BirthMax;
+int BirthRules[9];
+int SurvivalRules[9];
 
-int SurvivalMin;
-int SurvivalMax;
-
-float DecayAmount;
+int Decay;
 
 float4 AutomatonID;
 
@@ -60,7 +57,6 @@ void Step(uint3 id : SV_DispatchThreadID)
 
     int neighbours = 0;
 
-    // Moore neighbourhood
     for (int y = -1; y <= 1; y++)
     {
         for (int x = -1; x <= 1; x++)
@@ -68,65 +64,31 @@ void Step(uint3 id : SV_DispatchThreadID)
             if (x == 0 && y == 0)
                 continue;
 
-            int2 neighbourPos = pos + int2(x, y);
+            int2 p = pos + int2(x, y);
 
-            // Wrap around the world for now.
-            neighbourPos.x = (neighbourPos.x + Width) % Width;
-            neighbourPos.y = (neighbourPos.y + Height) % Height;
+            p.x = (p.x + Width) % Width;
+            p.y = (p.y + Height) % Height;
 
-            float4 neighbour = Current[neighbourPos];
-
-            // A cell counts as alive if it has any existence.
-            if (neighbour.a > 0.0)
-            {
+            if (Current[p].a > 0.5)
                 neighbours++;
-            }
         }
     }
 
+    bool born = neighbours == 3;
+    bool survives = neighbours == 2 || neighbours == 3;
 
-    // --------------------------------------------------
-    // Existing cell
-    // --------------------------------------------------
-
-    if (cell.a > 0.0)
+    if (cell.a > 0.5)
     {
-        if (neighbours >= SurvivalMin &&
-            neighbours <= SurvivalMax)
-        {
-            // Survives and becomes fully alive again.
+        if (survives)
             Result[pos] = float4(cell.rgb, 1.0);
-        }
         else
-        {
-            // Decay.
-            float newAlpha = cell.a - DecayAmount;
-
-            if (newAlpha <= 0.0)
-            {
-                Result[pos] = float4(0, 0, 0, 0);
-            }
-            else
-            {
-                Result[pos] = float4(cell.rgb, newAlpha);
-            }
-        }
+            Result[pos] = float4(0, 0, 0, 0);
     }
-
-    // --------------------------------------------------
-    // Empty cell
-    // --------------------------------------------------
-
     else
     {
-        if (neighbours >= BirthMin &&
-            neighbours <= BirthMax)
-        {
+        if (born)
             Result[pos] = float4(AutomatonID.rgb, 1.0);
-        }
         else
-        {
             Result[pos] = float4(0, 0, 0, 0);
-        }
     }
 }
