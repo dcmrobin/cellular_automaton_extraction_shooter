@@ -248,7 +248,7 @@ MonoBehaviour:
   cellularAutomaton: {fileID: 7200000, guid: a60b560a93f41b842a60e7e3f726abfb, type: 3}
   width: 700
   height: 700
-  updateRate: 100
+  updateRate: 50
   rules: 3/23/1
   automatonID: {x: 1, y: 0, z: 0}
 --- !u!4 &775166574

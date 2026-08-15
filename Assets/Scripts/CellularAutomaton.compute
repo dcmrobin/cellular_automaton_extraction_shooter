@@ -90,23 +90,7 @@ void Step(uint3 id : SV_DispatchThreadID)
             Result[pos] = float4(AutomatonID.rgb, 1.0);
         else
         {
-            if (Decay <= 1)
-            {
-                Result[pos] = float4(0, 0, 0, 0);
-            }
-            else
-            {
-                float newAlpha = cell.a - (1.0 / (float)Decay);
-
-                if (newAlpha <= 0.0)
-                {
-                    Result[pos] = float4(0, 0, 0, 0);
-                }
-                else
-                {
-                    Result[pos] = float4(cell.rgb, newAlpha);
-                }
-            }
+            Result[pos] = float4(0, 0, 0, 0);
         }
     }
 }

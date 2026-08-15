@@ -150,17 +150,8 @@ public class CAController : MonoBehaviour
 
     void Step()
     {
-        cellularAutomaton.SetTexture(
-            kernelStep,
-            "Current",
-            current
-        );
-
-        cellularAutomaton.SetTexture(
-            kernelStep,
-            "Result",
-            next
-        );
+        cellularAutomaton.SetTexture(kernelStep, "Current", current);
+        cellularAutomaton.SetTexture(kernelStep, "Result", next);
 
         Dispatch(kernelStep);
 
@@ -168,6 +159,9 @@ public class CAController : MonoBehaviour
         RenderTexture temp = current;
         current = next;
         next = temp;
+
+        // Keep the display in sync with the active buffer.
+        targetRenderer.material.mainTexture = current;
     }
 
 
