@@ -36,9 +36,14 @@ void Init(uint3 id : SV_DispatchThreadID)
     float random = Random01(id.xy);
 
     float deadState = (Decay > 1) ? (float)Decay : 0.0;
+    bool decayEnabled = Decay > 1;
+    bool decayCountUp = DecayCountUp != 0;
+    float span = max(1.0, deadState - 1.0);
+    float firstDecayFade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
+    float aliveFade = decayEnabled ? (decayCountUp ? max(0.1, firstDecayFade * 0.5) : 1.0) : 1.0;
 
     if (random > 0.5)
-        Result[id.xy] = float4(AutomatonID.rgb, 1.0);
+        Result[id.xy] = float4(AutomatonID.rgb * aliveFade, 1.0);
     else
         Result[id.xy] = float4(0, 0, 0, deadState);
 }
@@ -61,6 +66,11 @@ void Step(uint3 id : SV_DispatchThreadID)
     bool decayEnabled = Decay > 1;
     float deadState = decayEnabled ? (float)Decay : 0.0;
 
+    bool decayCountUp = DecayCountUp != 0;
+    float span = max(1.0, deadState - 1.0);
+    float firstDecayFade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
+    float aliveFade = decayEnabled ? (decayCountUp ? max(0.1, firstDecayFade * 0.5) : 1.0) : 1.0;
+
     bool isDecaying = decayEnabled && state > 1.5 && state < deadState - 0.5;
 
     if (isDecaying)
@@ -69,7 +79,16 @@ void Step(uint3 id : SV_DispatchThreadID)
         float span = max(1.0, deadState - 1.0);
         float fade = DecayCountUp ? (newState - 1.0) / span : 1.0 - (newState - 1.0) / span;
 
-        Result[pos] = float4(AutomatonID.rgb * fade, newState);
+        // If advancing reaches the dead state, write black RGB and the dead-state alpha.
+        if (newState >= deadState - 0.5)
+        {
+            Result[pos] = float4(0.0, 0.0, 0.0, deadState);
+        }
+        else
+        {
+            Result[pos] = float4(AutomatonID.rgb * fade, newState);
+        }
+
         return; // decaying cells never look at neighbours
     }
 
@@ -95,7 +114,7 @@ void Step(uint3 id : SV_DispatchThreadID)
 
     if (isAlive && survives)
     {
-        Result[pos] = float4(AutomatonID.rgb, 1.0);
+        Result[pos] = float4(AutomatonID.rgb * aliveFade, 1.0);
         return;
     }
 
@@ -111,5 +130,5 @@ void Step(uint3 id : SV_DispatchThreadID)
     // Dead: was already dead, decay just finished, Decay <= 2 with no room
     // to decay, or Decay <= 1 (classic instant-death Life). All paths
     // re-check neighbours for rebirth on this same tick.
-    Result[pos] = born ? float4(AutomatonID.rgb, 1.0) : float4(0, 0, 0, deadState);
+    Result[pos] = born ? float4(AutomatonID.rgb * aliveFade, 1.0) : float4(0, 0, 0, deadState);
 }
