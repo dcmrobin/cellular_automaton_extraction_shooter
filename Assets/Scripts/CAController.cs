@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 public class CAController : MonoBehaviour
@@ -25,6 +26,14 @@ public class CAController : MonoBehaviour
     [Header("Automaton Identity")]
     public Vector3 automatonID = new Vector3(1f, 0f, 0f);
 
+    // Fired right after each CA Step completes (post-swap, texture already
+    // reassigned to the renderer). Anything that draws on top of a freshly
+    // simulated world - the player - hooks in here.
+    public event Action OnCAStepped;
+
+    public RenderTexture CurrentTexture => current;
+    public int Decay { get; private set; }
+
     private RenderTexture current;
     private RenderTexture next;
 
@@ -49,7 +58,7 @@ public class CAController : MonoBehaviour
         ApplyTextureToPlane();
     }
 
-    
+
     void SetRules()
     {
         string[] parts = rules.Split('/');
@@ -66,7 +75,8 @@ public class CAController : MonoBehaviour
         cellularAutomaton.SetInt("BirthMask", birthMask);
         cellularAutomaton.SetInt("SurvivalMask", survivalMask);
 
-        cellularAutomaton.SetInt("Decay", int.Parse(parts[2]));
+        Decay = int.Parse(parts[2]);
+        cellularAutomaton.SetInt("Decay", Decay);
     }
 
     int ParseRuleMask(string rule)
@@ -123,16 +133,9 @@ public class CAController : MonoBehaviour
 
     void Initialize()
     {
-        cellularAutomaton.SetTexture(
-            kernelInit,
-            "Result",
-            current
-        );
+        cellularAutomaton.SetTexture(kernelInit, "Result", current);
 
-        cellularAutomaton.SetInt(
-            "RandomSeed",
-            Random.Range(0, int.MaxValue)
-        );
+        cellularAutomaton.SetInt("RandomSeed", UnityEngine.Random.Range(0, int.MaxValue));
 
         Dispatch(kernelInit);
     }
@@ -158,13 +161,13 @@ public class CAController : MonoBehaviour
 
         Dispatch(kernelStep);
 
-        // Swap textures.
         RenderTexture temp = current;
         current = next;
         next = temp;
 
-        // Keep the display in sync with the active buffer.
         targetRenderer.material.mainTexture = current;
+
+        OnCAStepped?.Invoke();
     }
 
 
@@ -173,12 +176,7 @@ public class CAController : MonoBehaviour
         int groupsX = Mathf.CeilToInt(width / 8f);
         int groupsY = Mathf.CeilToInt(height / 8f);
 
-        cellularAutomaton.Dispatch(
-            kernel,
-            groupsX,
-            groupsY,
-            1
-        );
+        cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
     }
 
 

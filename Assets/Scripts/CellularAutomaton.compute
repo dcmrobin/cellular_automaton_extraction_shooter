@@ -1,5 +1,7 @@
 #pragma kernel Init
 #pragma kernel Step
+#pragma kernel PlayerClear
+#pragma kernel PlayerDraw
 
 RWTexture2D<float4> Result;
 Texture2D<float4> Current;
@@ -42,7 +44,7 @@ void Init(uint3 id : SV_DispatchThreadID)
     float firstDecayFade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
     float aliveFade = decayEnabled ? (decayCountUp ? max(0.1, firstDecayFade * 0.5) : 1.0) : 1.0;
 
-    if (random > 0.5)
+    if (random > 0.95)
         Result[id.xy] = float4(AutomatonID.rgb * aliveFade, 1.0);
     else
         Result[id.xy] = float4(0, 0, 0, deadState);
@@ -58,11 +60,6 @@ void Step(uint3 id : SV_DispatchThreadID)
     int2 pos = int2(id.xy);
     float state = Current[pos].a;
 
-    // Decay > 1:
-    //   1            = alive
-    //   2 .. Decay-1 = decaying (ignores neighbours, fades)
-    //   Decay        = dead (checked for rebirth every tick)
-    // Decay <= 1: classic Life, 0 = dead, 1 = alive, no decay stage.
     bool decayEnabled = Decay > 1;
     float deadState = decayEnabled ? (float)Decay : 0.0;
 
@@ -79,7 +76,6 @@ void Step(uint3 id : SV_DispatchThreadID)
         float span = max(1.0, deadState - 1.0);
         float fade = DecayCountUp ? (newState - 1.0) / span : 1.0 - (newState - 1.0) / span;
 
-        // If advancing reaches the dead state, write black RGB and the dead-state alpha.
         if (newState >= deadState - 0.5)
         {
             Result[pos] = float4(0.0, 0.0, 0.0, deadState);
@@ -89,7 +85,7 @@ void Step(uint3 id : SV_DispatchThreadID)
             Result[pos] = float4(AutomatonID.rgb * fade, newState);
         }
 
-        return; // decaying cells never look at neighbours
+        return;
     }
 
     bool isAlive = state > 0.5 && state < 1.5;
@@ -105,7 +101,7 @@ void Step(uint3 id : SV_DispatchThreadID)
             p.y = (p.y + Height) % Height;
 
             float nState = Current[p].a;
-            if (nState > 0.5 && nState < 1.5) // only exactly-alive counts
+            if (nState > 0.5 && nState < 1.5)
                 neighbours++;
         }
 
@@ -120,15 +116,82 @@ void Step(uint3 id : SV_DispatchThreadID)
 
     if (isAlive && decayEnabled && 2.0 < deadState - 0.5)
     {
-        // Fails survival, enters the first decay frame.
         float span = max(1.0, deadState - 1.0);
         float fade = DecayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
         Result[pos] = float4(AutomatonID.rgb * fade, 2.0);
         return;
     }
 
-    // Dead: was already dead, decay just finished, Decay <= 2 with no room
-    // to decay, or Decay <= 1 (classic instant-death Life). All paths
-    // re-check neighbours for rebirth on this same tick.
     Result[pos] = born ? float4(AutomatonID.rgb * aliveFade, 1.0) : float4(0, 0, 0, deadState);
+}
+
+
+// ---------------------------------------------------------------------
+// Player
+// ---------------------------------------------------------------------
+
+RWTexture2D<float4> World;
+StructuredBuffer<int2> PlayerOffsets;
+StructuredBuffer<int> PlayerAlive; // 1 = still part of the body, 0 = permanently eaten
+int PlayerOffsetCount;
+int2 PlayerOrigin;
+int2 PlayerPrevOrigin;
+float4 PlayerColor;
+float4 VitalColor;
+int VitalOffsetIndex;
+
+bool IsSolid(float4 cell)
+{
+    float state = cell.a;
+
+    if (Decay > 1)
+    {
+        float deadState = (float)Decay;
+        return state > 0.5 && state < deadState - 0.5;
+    }
+
+    return state > 0.5;
+}
+
+[numthreads(64, 1, 1)]
+void PlayerClear(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= PlayerOffsetCount)
+        return;
+
+    int2 pos = PlayerPrevOrigin + PlayerOffsets[id.x];
+
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
+        return;
+
+    float4 existing = World[pos];
+
+    // Not gated by PlayerAlive on purpose: erasing an already-eaten (now
+    // CA-solid) cell is already blocked by IsSolid, and erasing empty space
+    // that used to hold a now-permanently-dead cell is a harmless no-op.
+    if (!IsSolid(existing))
+        World[pos] = float4(0, 0, 0, existing.a);
+}
+
+[numthreads(64, 1, 1)]
+void PlayerDraw(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= PlayerOffsetCount)
+        return;
+
+    if (PlayerAlive[id.x] == 0)
+        return; // permanently eaten - never redraws, even if the CA cell there later dies
+
+    int2 pos = PlayerOrigin + PlayerOffsets[id.x];
+
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
+        return;
+
+    float4 existing = World[pos];
+
+    if (!IsSolid(existing))
+    {
+        float3 color = ((int)id.x == VitalOffsetIndex) ? VitalColor.rgb : PlayerColor.rgb;
+        World[pos] = float4(color, existing.a);
+    }
 }
