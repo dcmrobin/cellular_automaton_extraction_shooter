@@ -185,7 +185,7 @@ Camera:
   far clip plane: 1000
   field of view: 60
   orthographic: 1
-  orthographic size: 0.5
+  orthographic size: 0.6
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
@@ -331,7 +331,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   caController: {fileID: 775166573}
   radius: 3
-  squishFactor: 0.5
   playerColor: {r: 0, g: 0.8679245, b: 0.025527216, a: 1}
   vitalColor: {r: 1, g: 1, b: 0.2, a: 1}
   moveRate: 30
