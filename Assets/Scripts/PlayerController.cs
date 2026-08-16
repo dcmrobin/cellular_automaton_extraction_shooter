@@ -46,6 +46,7 @@ public class PlayerController : MonoBehaviour
     private bool isDead;
 
     private Vector2Int[] offsets;
+    private Vector2Int[] preferredOffsets;
     private bool[] offsetAlive;
     private int[] aliveInts;
     private int offsetCount;
@@ -174,6 +175,8 @@ public class PlayerController : MonoBehaviour
         shader.SetVector("PlayerColor", playerColor);
         shader.SetVector("VitalColor", vitalColor);
         shader.SetInt("VitalOffsetIndex", vitalOffsetIndex);
+        shader.SetInt("PlayerRedistributeEnabled", 0);
+        shader.SetFloat("PlayerRedistributeFactor", 0.0f);
 
         Dispatch(kernelPlayerDraw);
     }
@@ -191,6 +194,8 @@ public class PlayerController : MonoBehaviour
         shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffer);
         shader.SetInt("PlayerOffsetCount", offsetCount);
         shader.SetInts("PlayerPrevOrigin", atOrigin.x, atOrigin.y);
+        shader.SetInt("PlayerRedistributeEnabled", 0);
+        shader.SetFloat("PlayerRedistributeFactor", 0.0f);
 
         Dispatch(kernelPlayerClear);
     }
@@ -220,6 +225,20 @@ public class PlayerController : MonoBehaviour
         offsets = list.ToArray();
         offsetCount = offsets.Length;
 
+        // Build a preferred ordering of offsets that packs cells from the
+        // centre outward. This is used when redistributing remaining cells
+        // after some are eaten so the body compacts around the vital cell.
+        preferredOffsets = new Vector2Int[offsetCount];
+        Array.Copy(offsets, preferredOffsets, offsetCount);
+        Array.Sort(preferredOffsets, (a, b) =>
+        {
+            int da = a.x * a.x + a.y * a.y;
+            int db = b.x * b.x + b.y * b.y;
+            if (da != db) return da - db;
+            if (a.y != b.y) return a.y - b.y;
+            return a.x - b.x;
+        });
+
         offsetAlive = new bool[offsetCount];
         aliveInts = new int[offsetCount];
 
@@ -243,6 +262,57 @@ public class PlayerController : MonoBehaviour
 
     void UploadAliveBuffer()
     {
+        for (int i = 0; i < offsetCount; i++)
+            aliveInts[i] = offsetAlive[i] ? 1 : 0;
+
+        aliveBuffer.SetData(aliveInts);
+    }
+
+    void RedistributeAliveSegments()
+    {
+        // Count alive segments (vital is guaranteed alive here)
+        int aliveCountNow = 0;
+        for (int i = 0; i < offsetCount; i++) if (offsetAlive[i]) aliveCountNow++;
+
+        if (aliveCountNow == 0)
+            return;
+
+        // Build new offsets: pack alive segments into the preferredOffsets[0..aliveCountNow-1]
+        var newOffsets = new Vector2Int[offsetCount];
+        var newAlive = new bool[offsetCount];
+
+        for (int i = 0; i < offsetCount; i++)
+        {
+            if (i < aliveCountNow)
+            {
+                newOffsets[i] = preferredOffsets[i];
+                newAlive[i] = true;
+            }
+            else
+            {
+                newOffsets[i] = preferredOffsets[i];
+                newAlive[i] = false;
+            }
+        }
+
+        // Ensure vital remains identified (preferredOffsets[0] should be zero)
+        vitalOffsetIndex = -1;
+        for (int i = 0; i < offsetCount; i++)
+        {
+            if (newOffsets[i] == Vector2Int.zero)
+            {
+                vitalOffsetIndex = i;
+                break;
+            }
+        }
+
+        // Replace arrays and upload to GPU
+        offsets = newOffsets;
+        offsetAlive = newAlive;
+
+        // upload offsets and alive buffers
+        offsetsBuffer.SetData(offsets);
+
         for (int i = 0; i < offsetCount; i++)
             aliveInts[i] = offsetAlive[i] ? 1 : 0;
 
@@ -313,7 +383,9 @@ public class PlayerController : MonoBehaviour
         }
 
         if (anyChanged)
-            UploadAliveBuffer();
+        {
+            RedistributeAliveSegments();
+        }
     }
 
     void Die(Vector2Int atOrigin)

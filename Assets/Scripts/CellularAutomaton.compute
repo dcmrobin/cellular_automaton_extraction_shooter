@@ -139,6 +139,11 @@ int2 PlayerPrevOrigin;
 float4 PlayerColor;
 float4 VitalColor;
 int VitalOffsetIndex;
+// When enabled, remaining alive player cells will be redistributed
+// toward the vital offset by this factor (0..1). 1.0 leaves them
+// at their original offsets, smaller values pull them closer.
+int PlayerRedistributeEnabled;
+float PlayerRedistributeFactor;
 
 bool IsSolid(float4 cell)
 {
@@ -159,7 +164,17 @@ void PlayerClear(uint3 id : SV_DispatchThreadID)
     if ((int)id.x >= PlayerOffsetCount)
         return;
 
-    int2 pos = PlayerPrevOrigin + PlayerOffsets[id.x];
+    int2 offset = PlayerOffsets[id.x];
+    // compute mapped offset (toward vital) if enabled
+    if (PlayerRedistributeEnabled != 0 && VitalOffsetIndex >= 0 && VitalOffsetIndex < PlayerOffsetCount)
+    {
+        int2 vitalOff = PlayerOffsets[VitalOffsetIndex];
+        float2 rel = float2(offset - vitalOff);
+        float2 newRel = rel * PlayerRedistributeFactor;
+        offset = vitalOff + int2(round(newRel));
+    }
+
+    int2 pos = PlayerPrevOrigin + offset;
 
     if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
         return;
@@ -182,7 +197,17 @@ void PlayerDraw(uint3 id : SV_DispatchThreadID)
     if (PlayerAlive[id.x] == 0)
         return; // permanently eaten - never redraws, even if the CA cell there later dies
 
-    int2 pos = PlayerOrigin + PlayerOffsets[id.x];
+    int2 offset = PlayerOffsets[id.x];
+    // compute mapped offset (toward vital) if enabled
+    if (PlayerRedistributeEnabled != 0 && VitalOffsetIndex >= 0 && VitalOffsetIndex < PlayerOffsetCount)
+    {
+        int2 vitalOff = PlayerOffsets[VitalOffsetIndex];
+        float2 rel = float2(offset - vitalOff);
+        float2 newRel = rel * PlayerRedistributeFactor;
+        offset = vitalOff + int2(round(newRel));
+    }
+
+    int2 pos = PlayerOrigin + offset;
 
     if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
         return;
