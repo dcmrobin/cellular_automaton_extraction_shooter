@@ -25,6 +25,7 @@ public class CameraFollow : MonoBehaviour
             return;
 
         Vector3 worldPos = GridToWorld(player.Origin);
+        player.transform.position = new Vector3(worldPos.x, worldPos.y, 0f);
 
         Vector3 desired = playPlane == PlayPlane.XZ_TopDown
             ? new Vector3(worldPos.x, worldPos.y + distance, worldPos.z)

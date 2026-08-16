@@ -11,11 +11,17 @@ int Height;
 
 int BirthMask;
 int SurvivalMask;
+int CurrentGunBirthMask;
+int CurrentGunSurvivalMask;
 
 int Decay;
+int CurrentGunDecay;
 int DecayCountUp;
 
+int GunCALifespan;
+
 float4 AutomatonID;
+float4 CurrentGunAutomatonID;
 
 uint RandomSeed;
 

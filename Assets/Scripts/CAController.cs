@@ -79,7 +79,7 @@ public class CAController : MonoBehaviour
         cellularAutomaton.SetInt("Decay", Decay);
     }
 
-    int ParseRuleMask(string rule)
+    public int ParseRuleMask(string rule)
     {
         int mask = 0;
 
