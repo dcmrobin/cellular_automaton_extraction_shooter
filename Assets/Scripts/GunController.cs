@@ -344,7 +344,7 @@ public class GunController : MonoBehaviour
             var birthList = new List<char>();
             foreach (char ch in birthStr)
             {
-                if (ch == '9' || ch == '0') continue;
+                if (ch == '9' || ch == '0' || ch == '1') continue; // could use some tweaking
                 if (!birthList.Contains(ch)) birthList.Add(ch);
             }
             birthStr = new string(birthList.ToArray());
@@ -354,7 +354,7 @@ public class GunController : MonoBehaviour
             var survivalList = new List<char>();
             foreach (char ch in survivalStr)
             {
-                if (ch == '9' || ch == '0') continue;
+                if (ch == '9') continue;
                 if (!survivalList.Contains(ch)) survivalList.Add(ch);
             }
             survivalStr = new string(survivalList.ToArray());
