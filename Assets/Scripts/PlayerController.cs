@@ -67,13 +67,32 @@ public class PlayerController : MonoBehaviour
     {
         var shader = caController.cellularAutomaton;
 
-        kernelPlayerClear = shader.FindKernel("PlayerClear");
-        kernelPlayerDraw = shader.FindKernel("PlayerDraw");
+        // Use the safe kernel lookup from CAController
+        kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
+        kernelPlayerDraw = caController.GetKernelIndex("PlayerDraw");
+
+        if (kernelPlayerClear < 0 || kernelPlayerDraw < 0)
+        {
+            Debug.LogError("CA-REAPER: Player kernels not found! Check compute shader.");
+            return;
+        }
 
         origin = new Vector2Int(caController.width / 2, caController.height / 2);
         prevOrigin = origin;
 
         BuildOffsetsBuffer();
+    }
+
+    void Dispatch(int kernel)
+    {
+        if (kernel < 0)
+        {
+            Debug.LogError("CA-REAPER: Cannot dispatch player kernel - invalid index");
+            return;
+        }
+
+        int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
+        caController.cellularAutomaton.Dispatch(kernel, groups, 1, 1);
     }
 
     void OnEnable()
@@ -292,12 +311,6 @@ public class PlayerController : MonoBehaviour
         Dispatch(kernelPlayerClear);
     }
 
-    void Dispatch(int kernel)
-    {
-        int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
-        caController.cellularAutomaton.Dispatch(kernel, groups, 1, 1);
-    }
-
     void BuildOffsetsBuffer()
     {
         var list = new List<Vector2Int>();
@@ -444,6 +457,11 @@ public class PlayerController : MonoBehaviour
     {
         float a = cell.a;
 
+        // Check for gun CA (alpha 20-30)
+        if (a >= 20.0f && a < 30.0f)
+            return true;
+
+        // Check for main CA
         if (caController.Decay > 1)
             return a > 0.5f && a < caController.Decay - 0.5f;
 

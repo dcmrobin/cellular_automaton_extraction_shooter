@@ -352,7 +352,7 @@ MonoBehaviour:
   cellularAutomaton: {fileID: 7200000, guid: a60b560a93f41b842a60e7e3f726abfb, type: 3}
   width: 700
   height: 700
-  updateRate: 5
+  updateRate: 50
   decayCountUp: 1
   rules: 278/3456/6
   automatonID: {x: 0, y: 0, z: 1}
@@ -604,8 +604,15 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   caController: {fileID: 775166573}
-  rules: 3/23/0
+  rules: 
   automatonID: {x: 1, y: 0, z: 0}
+  fireRate: 1
+  AOE: 1
+  shotLine: {fileID: 0}
+  shotLineDuration: 0.1
+  shotLineColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+  shotLineWidth: 0.1
+  maxShotDistance: 1000
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

@@ -26,9 +26,6 @@ public class CAController : MonoBehaviour
     [Header("Automaton Identity")]
     public Vector3 automatonID = new Vector3(1f, 0f, 0f);
 
-    // Fired right after each CA Step completes (post-swap, texture already
-    // reassigned to the renderer). Anything that draws on top of a freshly
-    // simulated world - the player - hooks in here.
     public event Action OnCAStepped;
 
     public RenderTexture CurrentTexture => current;
@@ -37,16 +34,23 @@ public class CAController : MonoBehaviour
     private RenderTexture current;
     private RenderTexture next;
 
-    private int kernelInit;
-    private int kernelStep;
+    private int kernelInit = -1;
+    private int kernelStep = -1;
+    private int kernelPlayerClear = -1;
+    private int kernelPlayerDraw = -1;
+    private int kernelGunImpact = -1;
+    private int kernelGunStep = -1;
 
     private float timer;
 
-
-    void Start()
+    void Awake()
     {
-        kernelInit = cellularAutomaton.FindKernel("Init");
-        kernelStep = cellularAutomaton.FindKernel("Step");
+        kernelInit = FindKernelSafely("Init");
+        kernelStep = FindKernelSafely("Step");
+        kernelPlayerClear = FindKernelSafely("PlayerClear");
+        kernelPlayerDraw = FindKernelSafely("PlayerDraw");
+        kernelGunImpact = FindKernelSafely("GunImpact");
+        kernelGunStep = FindKernelSafely("GunStep");
 
         current = CreateRenderTexture();
         next = CreateRenderTexture();
@@ -58,6 +62,23 @@ public class CAController : MonoBehaviour
         ApplyTextureToPlane();
     }
 
+    int FindKernelSafely(string kernelName)
+    {
+        if (cellularAutomaton == null)
+        {
+            Debug.LogError($"CA-REAPER: ComputeShader not assigned!");
+            return -1;
+        }
+
+        if (!cellularAutomaton.HasKernel(kernelName))
+        {
+            Debug.LogWarning($"CA-REAPER: Kernel '{kernelName}' not found in compute shader.");
+            return -1;
+        }
+
+        int kernelIndex = cellularAutomaton.FindKernel(kernelName);
+        return kernelIndex;
+    }
 
     void SetRules()
     {
@@ -95,7 +116,6 @@ public class CAController : MonoBehaviour
         return mask;
     }
 
-
     RenderTexture CreateRenderTexture()
     {
         RenderTexture texture = new RenderTexture(
@@ -114,7 +134,6 @@ public class CAController : MonoBehaviour
         return texture;
     }
 
-
     void SetupComputeShader()
     {
         cellularAutomaton.SetInt("Width", width);
@@ -130,16 +149,19 @@ public class CAController : MonoBehaviour
         SetRules();
     }
 
-
     void Initialize()
     {
-        cellularAutomaton.SetTexture(kernelInit, "Result", current);
+        if (kernelInit < 0)
+        {
+            Debug.LogError("CA-REAPER: Init kernel not found!");
+            return;
+        }
 
+        cellularAutomaton.SetTexture(kernelInit, "Result", current);
         cellularAutomaton.SetInt("RandomSeed", UnityEngine.Random.Range(0, int.MaxValue));
 
-        Dispatch(kernelInit);
+        DispatchKernel(kernelInit, "Init");
     }
-
 
     void Update()
     {
@@ -148,18 +170,22 @@ public class CAController : MonoBehaviour
         if (timer >= 1f / updateRate)
         {
             timer = 0f;
-
             Step();
         }
     }
 
-
     void Step()
     {
+        if (kernelStep < 0)
+        {
+            Debug.LogError("CA-REAPER: Step kernel not found!");
+            return;
+        }
+
         cellularAutomaton.SetTexture(kernelStep, "Current", current);
         cellularAutomaton.SetTexture(kernelStep, "Result", next);
 
-        Dispatch(kernelStep);
+        DispatchKernel(kernelStep, "Step");
 
         RenderTexture temp = current;
         current = next;
@@ -170,15 +196,71 @@ public class CAController : MonoBehaviour
         OnCAStepped?.Invoke();
     }
 
-
-    void Dispatch(int kernel)
+    void DispatchKernel(int kernelIndex, string kernelName)
     {
+        if (kernelIndex < 0)
+        {
+            Debug.LogError($"CA-REAPER: Cannot dispatch {kernelName} - kernel index invalid");
+            return;
+        }
+
         int groupsX = Mathf.CeilToInt(width / 8f);
         int groupsY = Mathf.CeilToInt(height / 8f);
 
-        cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
+        cellularAutomaton.Dispatch(kernelIndex, groupsX, groupsY, 1);
     }
 
+    // Simple direct modification of current texture
+    public void ModifyTextureDirect(int kernel, int groupsX, int groupsY)
+    {
+        if (kernel < 0)
+        {
+            Debug.LogError("CA-REAPER: Cannot modify texture - kernel invalid");
+            return;
+        }
+
+        if (current == null)
+        {
+            Debug.LogError("CA-REAPER: Current texture is null!");
+            return;
+        }
+
+        RenderTexture tempOutput = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGBFloat);
+        tempOutput.enableRandomWrite = true;
+        tempOutput.Create();
+
+        cellularAutomaton.SetTexture(kernel, "Current", current);
+        cellularAutomaton.SetTexture(kernel, "Result", tempOutput);
+        cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
+
+        Graphics.Blit(tempOutput, current);
+        
+        RenderTexture.ReleaseTemporary(tempOutput);
+
+        targetRenderer.material.mainTexture = current;
+    }
+
+    public int GetKernelIndex(string kernelName)
+    {
+        switch (kernelName)
+        {
+            case "Init":
+                return kernelInit;
+            case "Step":
+                return kernelStep;
+            case "PlayerClear":
+                return kernelPlayerClear;
+            case "PlayerDraw":
+                return kernelPlayerDraw;
+            case "GunImpact":
+                return kernelGunImpact;
+            case "GunStep":
+                return kernelGunStep;
+            default:
+                Debug.LogError($"CA-REAPER: Unknown kernel name '{kernelName}'");
+                return -1;
+        }
+    }
 
     void ApplyTextureToPlane()
     {
@@ -189,10 +271,7 @@ public class CAController : MonoBehaviour
         }
 
         targetRenderer.material.mainTexture = current;
-
-        Debug.Log("CA-REAPER: RenderTexture assigned to Quad.");
     }
-
 
     void OnDestroy()
     {
