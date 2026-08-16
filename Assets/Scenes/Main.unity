@@ -331,6 +331,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   caController: {fileID: 775166573}
   radius: 3
+  squishFactor: 0.5
   playerColor: {r: 0, g: 0.8679245, b: 0.025527216, a: 1}
   vitalColor: {r: 1, g: 1, b: 0.2, a: 1}
   moveRate: 30
