@@ -32,7 +32,6 @@ int GunActive;
 
 uint RandomSeed;
 
-// Player variables
 RWTexture2D<float4> World;
 StructuredBuffer<int2> PlayerOffsets;
 StructuredBuffer<int> PlayerAlive;
@@ -45,6 +44,9 @@ int VitalOffsetIndex;
 int PlayerRedistributeEnabled;
 float PlayerRedistributeFactor;
 
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
 float Random01(uint2 p)
 {
     uint n = p.x + p.y * 374761393u + RandomSeed * 668265263u;
@@ -56,42 +58,41 @@ float Random01(uint2 p)
 bool IsMainCASolid(float4 cell)
 {
     float state = cell.a;
-    if (Decay > 1)
-    {
-        return state > 0.5 && state < Decay - 0.5;
-    }
+    if (Decay > 1) return state > 0.5 && state < Decay - 0.5;
     return state > 0.5 && state < 1.5;
 }
 
-bool IsGunCA(float4 cell)
+bool IsGunCA(float4 cell) { return cell.a >= 20.0 && cell.a < 30.0; }
+bool IsGunCAAlive(float4 cell) { return cell.a >= 20.0 && cell.a < 21.0; }
+bool IsAnyCASolid(float4 cell) { return IsMainCASolid(cell) || IsGunCA(cell); }
+
+float GetSpan() { return max(1.0, (Decay > 1 ? (float)Decay : 1.0) - 1.0); }
+
+float GetAliveFade()
 {
-    return cell.a >= 20.0 && cell.a < 30.0;
+    if (Decay <= 1) return 1.0;
+    if (DecayCountUp != 0) return max(0.1, (1.0 / GetSpan()) * 0.5);
+    return 1.0;
 }
 
-bool IsGunCAAlive(float4 cell)
+float GetDecayFade(float state)
 {
-    return cell.a >= 20.0 && cell.a < 21.0;
+    float span = GetSpan();
+    if (DecayCountUp != 0) return (state - 1.0) / span;
+    return 1.0 - (state - 1.0) / span;
 }
 
-bool IsAnyCASolid(float4 cell)
-{
-    return IsMainCASolid(cell) || IsGunCA(cell);
-}
-
+// ------------------------------------------------------------------
+// Init
+// ------------------------------------------------------------------
 [numthreads(8, 8, 1)]
 void Init(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width || id.y >= Height)
-        return;
+    if (id.x >= Width || id.y >= Height) return;
 
     float random = Random01(id.xy);
-
     float deadState = (Decay > 1) ? (float)Decay : 0.0;
-    bool decayEnabled = Decay > 1;
-    bool decayCountUp = DecayCountUp != 0;
-    float span = max(1.0, deadState - 1.0);
-    float firstDecayFade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
-    float aliveFade = decayEnabled ? (decayCountUp ? max(0.1, firstDecayFade * 0.5) : 1.0) : 1.0;
+    float aliveFade = GetAliveFade();
 
     if (random > 0.95)
         Result[id.xy] = float4(AutomatonID.rgb * aliveFade, 1.0);
@@ -99,60 +100,45 @@ void Init(uint3 id : SV_DispatchThreadID)
         Result[id.xy] = float4(0, 0, 0, deadState);
 }
 
+// ------------------------------------------------------------------
+// Main CA Step
+// ------------------------------------------------------------------
 [numthreads(8, 8, 1)]
 void Step(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width || id.y >= Height)
-        return;
+    if (id.x >= Width || id.y >= Height) return;
 
     int2 pos = int2(id.xy);
     float state = Current[pos].a;
-
     bool isGunCell = IsGunCA(Current[pos]);
-
     float deadState = (Decay > 1) ? (float)Decay : 0.0;
     bool decayEnabled = Decay > 1;
-    bool decayCountUp = DecayCountUp != 0;
-    float span = max(1.0, deadState - 1.0);
-    float firstDecayFade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
-    float aliveFade = decayEnabled ? (decayCountUp ? max(0.1, firstDecayFade * 0.5) : 1.0) : 1.0;
+    float aliveFade = GetAliveFade();
 
     bool isDecaying = !isGunCell && decayEnabled && state > 1.5 && state < deadState - 0.5;
 
     if (isDecaying)
     {
         float newState = state + 1.0;
-        float fade = decayCountUp ? (newState - 1.0) / span : 1.0 - (newState - 1.0) / span;
-
         if (newState >= deadState - 0.5)
-        {
-            Result[pos] = float4(0.0, 0.0, 0.0, deadState);
-        }
+            Result[pos] = float4(0, 0, 0, deadState);
         else
-        {
-            Result[pos] = float4(AutomatonID.rgb * fade, newState);
-        }
-
+            Result[pos] = float4(AutomatonID.rgb * GetDecayFade(newState), newState);
         return;
     }
 
     bool isAlive = !isGunCell && state > 0.5 && state < 1.5;
 
-    // Count MAIN CA neighbors (gun CA cells count as dead/empty)
     int neighbours = 0;
     for (int y = -1; y <= 1; y++)
     {
         for (int x = -1; x <= 1; x++)
         {
             if (x == 0 && y == 0) continue;
-
             int2 p = pos + int2(x, y);
             p.x = (p.x + Width) % Width;
             p.y = (p.y + Height) % Height;
-
-            float nState = Current[p].a;
-            
-            if (!IsGunCA(Current[p]) && nState > 0.5 && nState < 1.5)
+            if (!IsGunCA(Current[p]) && Current[p].a > 0.5 && Current[p].a < 1.5)
                 neighbours++;
         }
     }
@@ -160,7 +146,6 @@ void Step(uint3 id : SV_DispatchThreadID)
     bool born = (BirthMask & (1 << neighbours)) != 0;
     bool survives = (SurvivalMask & (1 << neighbours)) != 0;
 
-    // Handle alive main CA cells with proper fade
     if (isAlive && survives)
     {
         Result[pos] = float4(AutomatonID.rgb * aliveFade, 1.0);
@@ -169,41 +154,29 @@ void Step(uint3 id : SV_DispatchThreadID)
 
     if (isAlive && decayEnabled && 2.0 < deadState - 0.5)
     {
-        float fade = decayCountUp ? (1.0 / span) : (1.0 - 1.0 / span);
-        Result[pos] = float4(AutomatonID.rgb * fade, 2.0);
+        Result[pos] = float4(AutomatonID.rgb * GetDecayFade(2.0), 2.0);
         return;
     }
 
-    // Birth uses aliveFade too
     Result[pos] = born ? float4(AutomatonID.rgb * aliveFade, 1.0) : (isGunCell ? Current[pos] : float4(0, 0, 0, deadState));
 }
 
+// ------------------------------------------------------------------
+// Gun Impact
+// ------------------------------------------------------------------
 [numthreads(8, 8, 1)]
 void GunImpact(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width || id.y >= Height)
-        return;
-    
+    if (id.x >= Width || id.y >= Height) return;
     int2 pos = int2(id.xy);
-    float dist = distance(float2(pos), float2(GunImpactCenter));
-    
-    if (dist <= GunImpactRadius)
+
+    if (distance(float2(pos), float2(GunImpactCenter)) <= GunImpactRadius)
     {
-        float4 currentCell = Current[pos];
-        
-        bool isMainCAAlive = IsMainCASolid(currentCell);
-        bool isGunCA = IsGunCA(currentCell);
-        
-        if (isMainCAAlive || isGunCA)
-        {
-            // Convert this living cell to gun CA
+        float4 current = Current[pos];
+        if (IsMainCASolid(current) || IsGunCA(current))
             Result[pos] = float4(CurrentGunAutomatonID.rgb, 20.0);
-        }
         else
-        {
-            // Dead cell - leave empty
-            Result[pos] = currentCell;
-        }
+            Result[pos] = current;
     }
     else
     {
@@ -211,20 +184,19 @@ void GunImpact(uint3 id : SV_DispatchThreadID)
     }
 }
 
+// ------------------------------------------------------------------
+// Gun CA Step
+// ------------------------------------------------------------------
 [numthreads(8, 8, 1)]
 void GunStep(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width || id.y >= Height)
-        return;
-    
+    if (id.x >= Width || id.y >= Height) return;
     int2 pos = int2(id.xy);
     float state = Current[pos].a;
-    
-    // Check if this cell is gun CA or adjacent to gun CA
+
     bool isGunCell = (state >= 20.0 && state < 30.0);
     bool isNearGun = false;
-    
-    // Check if any neighbor is gun CA
+
     if (!isGunCell)
     {
         for (int y = -1; y <= 1; y++)
@@ -232,116 +204,83 @@ void GunStep(uint3 id : SV_DispatchThreadID)
             for (int x = -1; x <= 1; x++)
             {
                 if (x == 0 && y == 0) continue;
-                
                 int2 p = pos + int2(x, y);
                 p.x = (p.x + Width) % Width;
                 p.y = (p.y + Height) % Height;
-                
-                if (IsGunCA(Current[p]))
-                {
-                    isNearGun = true;
-                    break;
-                }
+                if (IsGunCA(Current[p])) { isNearGun = true; break; }
             }
-            if (isNearGun)
-                break;
+            if (isNearGun) break;
         }
     }
-    
-    // Skip cells that aren't gun CA or near gun CA
+
     if (!isGunCell && !isNearGun)
     {
         Result[pos] = Current[pos];
         return;
     }
-    
-    // Handle decaying gun CA cells
+
+    // Decaying gun CA
     if (isGunCell && state >= 21.0 && state < 30.0)
     {
         float gunDecayState = 20.0 + (float)CurrentGunDecay;
-        
         if (CurrentGunDecay > 1)
         {
             float newState = state + 1.0;
-            
             if (newState >= gunDecayState)
-            {
-                // Gun CA cell fully decayed - dies
                 Result[pos] = float4(0, 0, 0, 0);
-            }
             else
             {
-                // Continue decaying
                 float fade = 1.0 - (newState - 20.0) / max(1.0, gunDecayState - 20.0);
                 Result[pos] = float4(CurrentGunAutomatonID.rgb * fade, newState);
             }
         }
         else
         {
-            // No decay - just remove
             Result[pos] = float4(0, 0, 0, 0);
         }
         return;
     }
-    
-    // Count gun CA neighbors
+
     int gunNeighbours = 0;
     for (int y = -1; y <= 1; y++)
     {
         for (int x = -1; x <= 1; x++)
         {
             if (x == 0 && y == 0) continue;
-            
             int2 p = pos + int2(x, y);
             p.x = (p.x + Width) % Width;
             p.y = (p.y + Height) % Height;
-            
-            float nState = Current[p].a;
-            if (nState >= 20.0 && nState < 21.0) // Alive gun CA
-                gunNeighbours++;
+            if (Current[p].a >= 20.0 && Current[p].a < 21.0) gunNeighbours++;
         }
     }
-    
+
     bool isGunAlive = (state >= 20.0 && state < 21.0);
-    
-    // Gun CA rules
     bool gunSurvives = (CurrentGunSurvivalMask & (1 << gunNeighbours)) != 0;
     bool gunBorn = (CurrentGunBirthMask & (1 << gunNeighbours)) != 0;
-    
+
     if (isGunAlive && gunSurvives)
-    {
-        // Gun CA cell survives
         Result[pos] = float4(CurrentGunAutomatonID.rgb, 20.0);
-    }
     else if (isGunAlive && CurrentGunDecay > 1)
     {
-        // Gun CA cell starts decaying
         float gunDecayState = 20.0 + (float)CurrentGunDecay;
         float fade = 1.0 / max(1.0, gunDecayState - 20.0);
         Result[pos] = float4(CurrentGunAutomatonID.rgb * fade, 21.0);
     }
     else if (isGunAlive)
-    {
-        // Gun CA cell dies immediately (no decay)
         Result[pos] = float4(0, 0, 0, 0);
-    }
     else if (gunBorn && !IsMainCASolid(Current[pos]))
-    {
-        // New gun CA cell is born
         Result[pos] = float4(CurrentGunAutomatonID.rgb, 20.0);
-    }
     else
-    {
-        // Leave unchanged
         Result[pos] = Current[pos];
-    }
 }
 
+// ------------------------------------------------------------------
+// Player Clear
+// ------------------------------------------------------------------
 [numthreads(64, 1, 1)]
 void PlayerClear(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= PlayerOffsetCount)
-        return;
+    if ((int)id.x >= PlayerOffsetCount) return;
 
     int2 offset = PlayerOffsets[id.x];
     if (PlayerRedistributeEnabled != 0 && VitalOffsetIndex >= 0 && VitalOffsetIndex < PlayerOffsetCount)
@@ -353,24 +292,21 @@ void PlayerClear(uint3 id : SV_DispatchThreadID)
     }
 
     int2 pos = PlayerPrevOrigin + offset;
-
-    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
-        return;
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
 
     float4 existing = World[pos];
-
     if (!IsAnyCASolid(existing))
         World[pos] = float4(0, 0, 0, existing.a);
 }
 
+// ------------------------------------------------------------------
+// Player Draw
+// ------------------------------------------------------------------
 [numthreads(64, 1, 1)]
 void PlayerDraw(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= PlayerOffsetCount)
-        return;
-
-    if (PlayerAlive[id.x] == 0)
-        return;
+    if ((int)id.x >= PlayerOffsetCount) return;
+    if (PlayerAlive[id.x] == 0) return;
 
     int2 offset = PlayerOffsets[id.x];
     if (PlayerRedistributeEnabled != 0 && VitalOffsetIndex >= 0 && VitalOffsetIndex < PlayerOffsetCount)
@@ -382,12 +318,9 @@ void PlayerDraw(uint3 id : SV_DispatchThreadID)
     }
 
     int2 pos = PlayerOrigin + offset;
-
-    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height)
-        return;
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
 
     float4 existing = World[pos];
-
     if (!IsAnyCASolid(existing))
     {
         float3 color = ((int)id.x == VitalOffsetIndex) ? VitalColor.rgb : PlayerColor.rgb;

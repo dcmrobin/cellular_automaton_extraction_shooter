@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 public class CAController : MonoBehaviour
 {
@@ -17,7 +18,6 @@ public class CAController : MonoBehaviour
     public float updateRate = 10f;
 
     [Header("Decay Behaviour")]
-    [Tooltip("If enabled, decaying cells start at the lowest decay value and count UP toward the highest before dying, instead of starting high and counting DOWN.")]
     public bool decayCountUp = false;
 
     [Header("Automaton Rules (Birth/Survival/Decay)")]
@@ -56,9 +56,7 @@ public class CAController : MonoBehaviour
         next = CreateRenderTexture();
 
         SetupComputeShader();
-
         Initialize();
-
         ApplyTextureToPlane();
     }
 
@@ -66,24 +64,20 @@ public class CAController : MonoBehaviour
     {
         if (cellularAutomaton == null)
         {
-            Debug.LogError($"CA-REAPER: ComputeShader not assigned!");
+            Debug.LogError("CA-REAPER: ComputeShader not assigned!");
             return -1;
         }
-
         if (!cellularAutomaton.HasKernel(kernelName))
         {
-            Debug.LogWarning($"CA-REAPER: Kernel '{kernelName}' not found in compute shader.");
+            Debug.LogWarning($"CA-REAPER: Kernel '{kernelName}' not found.");
             return -1;
         }
-
-        int kernelIndex = cellularAutomaton.FindKernel(kernelName);
-        return kernelIndex;
+        return cellularAutomaton.FindKernel(kernelName);
     }
 
     void SetRules()
     {
         string[] parts = rules.Split('/');
-
         if (parts.Length != 3)
         {
             Debug.LogError("CA-REAPER: Invalid rule format! Use B/S/D");
@@ -103,34 +97,21 @@ public class CAController : MonoBehaviour
     public int ParseRuleMask(string rule)
     {
         int mask = 0;
-
         foreach (char c in rule)
         {
             if (c >= '0' && c <= '8')
-            {
-                int number = c - '0';
-                mask |= (1 << number);
-            }
+                mask |= (1 << (c - '0'));
         }
-
         return mask;
     }
 
     RenderTexture CreateRenderTexture()
     {
-        RenderTexture texture = new RenderTexture(
-            width,
-            height,
-            0,
-            RenderTextureFormat.ARGBFloat
-        );
-
+        RenderTexture texture = new RenderTexture(width, height, 0, RenderTextureFormat.ARGBFloat);
         texture.enableRandomWrite = true;
         texture.filterMode = FilterMode.Point;
         texture.wrapMode = TextureWrapMode.Repeat;
-
         texture.Create();
-
         return texture;
     }
 
@@ -138,14 +119,8 @@ public class CAController : MonoBehaviour
     {
         cellularAutomaton.SetInt("Width", width);
         cellularAutomaton.SetInt("Height", height);
-
-        cellularAutomaton.SetVector(
-            "AutomatonID",
-            new Vector4(automatonID.x, automatonID.y, automatonID.z, 1)
-        );
-
+        cellularAutomaton.SetVector("AutomatonID", new Vector4(automatonID.x, automatonID.y, automatonID.z, 1));
         cellularAutomaton.SetInt("DecayCountUp", decayCountUp ? 1 : 0);
-
         SetRules();
     }
 
@@ -156,17 +131,14 @@ public class CAController : MonoBehaviour
             Debug.LogError("CA-REAPER: Init kernel not found!");
             return;
         }
-
         cellularAutomaton.SetTexture(kernelInit, "Result", current);
         cellularAutomaton.SetInt("RandomSeed", UnityEngine.Random.Range(0, int.MaxValue));
-
         DispatchKernel(kernelInit, "Init");
     }
 
     void Update()
     {
         timer += Time.deltaTime;
-
         if (timer >= 1f / updateRate)
         {
             timer = 0f;
@@ -184,7 +156,6 @@ public class CAController : MonoBehaviour
 
         cellularAutomaton.SetTexture(kernelStep, "Current", current);
         cellularAutomaton.SetTexture(kernelStep, "Result", next);
-
         DispatchKernel(kernelStep, "Step");
 
         RenderTexture temp = current;
@@ -192,7 +163,6 @@ public class CAController : MonoBehaviour
         next = temp;
 
         targetRenderer.material.mainTexture = current;
-
         OnCAStepped?.Invoke();
     }
 
@@ -200,25 +170,21 @@ public class CAController : MonoBehaviour
     {
         if (kernelIndex < 0)
         {
-            Debug.LogError($"CA-REAPER: Cannot dispatch {kernelName} - kernel index invalid");
+            Debug.LogError($"CA-REAPER: Cannot dispatch {kernelName} - invalid kernel index");
             return;
         }
-
         int groupsX = Mathf.CeilToInt(width / 8f);
         int groupsY = Mathf.CeilToInt(height / 8f);
-
         cellularAutomaton.Dispatch(kernelIndex, groupsX, groupsY, 1);
     }
 
-    // Simple direct modification of current texture
     public void ModifyTextureDirect(int kernel, int groupsX, int groupsY)
     {
         if (kernel < 0)
         {
-            Debug.LogError("CA-REAPER: Cannot modify texture - kernel invalid");
+            Debug.LogError("CA-REAPER: Cannot modify texture - invalid kernel");
             return;
         }
-
         if (current == null)
         {
             Debug.LogError("CA-REAPER: Current texture is null!");
@@ -234,9 +200,7 @@ public class CAController : MonoBehaviour
         cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
 
         Graphics.Blit(tempOutput, current);
-        
         RenderTexture.ReleaseTemporary(tempOutput);
-
         targetRenderer.material.mainTexture = current;
     }
 
@@ -244,23 +208,49 @@ public class CAController : MonoBehaviour
     {
         switch (kernelName)
         {
-            case "Init":
-                return kernelInit;
-            case "Step":
-                return kernelStep;
-            case "PlayerClear":
-                return kernelPlayerClear;
-            case "PlayerDraw":
-                return kernelPlayerDraw;
-            case "GunImpact":
-                return kernelGunImpact;
-            case "GunStep":
-                return kernelGunStep;
+            case "Init": return kernelInit;
+            case "Step": return kernelStep;
+            case "PlayerClear": return kernelPlayerClear;
+            case "PlayerDraw": return kernelPlayerDraw;
+            case "GunImpact": return kernelGunImpact;
+            case "GunStep": return kernelGunStep;
             default:
                 Debug.LogError($"CA-REAPER: Unknown kernel name '{kernelName}'");
                 return -1;
         }
     }
+
+    public void RequestColorData(Action<Color[]> callback)
+    {
+        if (CurrentTexture == null)
+        {
+            callback?.Invoke(null);
+            return;
+        }
+
+        AsyncGPUReadback.Request(CurrentTexture, 0, request =>
+        {
+            if (request.hasError)
+            {
+                callback?.Invoke(null);
+                return;
+            }
+            var data = request.GetData<Color>();
+            Color[] copy = new Color[data.Length];
+            data.CopyTo(copy);
+            callback?.Invoke(copy);
+        });
+    }
+
+    public bool IsSolid(Color cell)
+    {
+        float a = cell.a;
+        if (a >= 20f && a < 30f) return true;
+        if (Decay > 1) return a > 0.5f && a < Decay - 0.5f;
+        return a > 0.5f && a < 1.5f;
+    }
+
+    public bool IsGunCA(Color cell) => cell.a >= 20f && cell.a < 30f;
 
     void ApplyTextureToPlane()
     {
@@ -269,16 +259,12 @@ public class CAController : MonoBehaviour
             Debug.LogError("CA-REAPER: Target Renderer is not assigned!");
             return;
         }
-
         targetRenderer.material.mainTexture = current;
     }
 
     void OnDestroy()
     {
-        if (current != null)
-            current.Release();
-
-        if (next != null)
-            next.Release();
+        if (current != null) current.Release();
+        if (next != null) next.Release();
     }
 }

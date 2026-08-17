@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 public class PlayerController : MonoBehaviour
 {
@@ -9,33 +8,25 @@ public class PlayerController : MonoBehaviour
     public CAController caController;
 
     [Header("Shape")]
-    [Tooltip("Radius (in cells) of the filled circle that makes up the player's body.")]
     public int radius = 4;
 
     [Header("Identity")]
     public Color playerColor = new Color(0.2f, 0.6f, 1f);
-    [Tooltip("Colour of the single central vital cell. Losing it is an instant kill.")]
     public Color vitalColor = new Color(1f, 1f, 0.2f);
 
     [Header("Movement")]
-    [Tooltip("Grid cells moved per second while a direction key is held.")]
     public float moveRate = 8f;
 
     public event Action OnPlayerDied;
     public Vector2Int Origin => origin;
     public bool IsDead => isDead;
-
     public float HealthFraction
     {
         get
         {
-            if (offsetAlive == null || offsetCount == 0)
-                return 0f;
-
+            if (offsetAlive == null || offsetCount == 0) return 0f;
             int alive = 0;
-            for (int i = 0; i < offsetCount; i++)
-                if (offsetAlive[i]) alive++;
-
+            for (int i = 0; i < offsetCount; i++) if (offsetAlive[i]) alive++;
             return alive / (float)offsetCount;
         }
     }
@@ -59,86 +50,64 @@ public class PlayerController : MonoBehaviour
     private int kernelPlayerDraw;
 
     private Color[] solidSnapshot;
-    private Color[] previousSnapshot; // For detecting CA growth into player
+    private Color[] previousSnapshot;
     private bool snapshotReady;
     private bool drawnOnce;
 
     void Start()
     {
-        var shader = caController.cellularAutomaton;
-
-        // Use the safe kernel lookup from CAController
         kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
         kernelPlayerDraw = caController.GetKernelIndex("PlayerDraw");
 
         if (kernelPlayerClear < 0 || kernelPlayerDraw < 0)
         {
-            Debug.LogError("CA-REAPER: Player kernels not found! Check compute shader.");
+            Debug.LogError("CA-REAPER: Player kernels not found!");
             return;
         }
 
         origin = new Vector2Int(caController.width / 2, caController.height / 2);
         prevOrigin = origin;
-
         BuildOffsetsBuffer();
     }
 
     void Dispatch(int kernel)
     {
-        if (kernel < 0)
-        {
-            Debug.LogError("CA-REAPER: Cannot dispatch player kernel - invalid index");
-            return;
-        }
-
+        if (kernel < 0) return;
         int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
         caController.cellularAutomaton.Dispatch(kernel, groups, 1, 1);
     }
 
     void OnEnable()
     {
-        if (caController != null)
-            caController.OnCAStepped += HandleCAStepped;
+        if (caController != null) caController.OnCAStepped += HandleCAStepped;
     }
 
     void OnDisable()
     {
-        if (caController != null)
-            caController.OnCAStepped -= HandleCAStepped;
+        if (caController != null) caController.OnCAStepped -= HandleCAStepped;
     }
 
     void Update()
     {
         if (!drawnOnce)
         {
-            if (caController.CurrentTexture == null)
-                return;
-
+            if (caController.CurrentTexture == null) return;
             DrawPlayer();
             prevOrigin = origin;
             drawnOnce = true;
-            
-            // Initialize snapshot after first draw
             RequestSnapshot();
         }
-
         HandleMovement();
     }
 
     void HandleMovement()
     {
-        if (isDead)
-            return;
-
+        if (isDead) return;
         moveTimer += Time.deltaTime;
-
         float interval = 1f / Mathf.Max(0.01f, moveRate);
-
-        if (moveTimer < interval)
-            return;
+        if (moveTimer < interval) return;
 
         Vector2Int dir = Vector2Int.zero;
-
         if (Input.GetKey(KeyCode.W)) dir.y += 1;
         if (Input.GetKey(KeyCode.S)) dir.y -= 1;
         if (Input.GetKey(KeyCode.A)) dir.x -= 1;
@@ -151,15 +120,10 @@ public class PlayerController : MonoBehaviour
         }
 
         moveTimer = 0f;
-
         Vector2Int candidate = origin + dir;
-
-        // Check if the ENTIRE player shape can fit at the new position
-        if (!CanFitAt(candidate))
-            return; // Can't move - player is blocked
+        if (!CanFitAt(candidate)) return;
 
         origin = candidate;
-
         ClearPlayer(prevOrigin);
         DrawPlayer();
         prevOrigin = origin;
@@ -167,90 +131,53 @@ public class PlayerController : MonoBehaviour
 
     bool CanFitAt(Vector2Int newOrigin)
     {
-        // Check if any alive cell would overlap with solid CA cells
         for (int i = 0; i < offsetCount; i++)
         {
-            if (!offsetAlive[i])
-                continue;
-
+            if (!offsetAlive[i]) continue;
             Vector2Int pos = newOrigin + offsets[i];
-
-            // Check world bounds
-            if (pos.x < 0 || pos.x >= caController.width || 
-                pos.y < 0 || pos.y >= caController.height)
-                return false;
-
-            // Check if position is occupied by CA
-            if (IsSolidAt(pos.x, pos.y))
-                return false;
+            if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) return false;
+            if (IsSolidAt(pos.x, pos.y)) return false;
         }
-
         return true;
     }
 
     void HandleCAStepped()
     {
-        if (isDead)
-            return;
-
-        // Check for cells eaten by CA growth BEFORE redrawing
+        if (isDead) return;
         CheckForCAEatingPlayer();
-
-        // Redraw player on top of the new CA state
         DrawPlayer();
         prevOrigin = origin;
-
-        // Get fresh snapshot for movement collision
         RequestSnapshot();
     }
 
     void CheckForCAEatingPlayer()
     {
-        if (!snapshotReady || previousSnapshot == null)
-            return;
+        if (!snapshotReady || previousSnapshot == null) return;
 
-        // Request current CA state to compare with previous
-        AsyncGPUReadback.Request(caController.CurrentTexture, 0, request =>
+        caController.RequestColorData(currentData =>
         {
-            if (request.hasError)
-                return;
+            if (currentData == null) return;
 
-            var currentData = request.GetData<Color>();
-            
             bool anyEaten = false;
             bool vitalEaten = false;
 
-            // Check each alive player cell to see if CA grew into it
             for (int i = 0; i < offsetCount; i++)
             {
-                if (!offsetAlive[i])
-                    continue;
-
+                if (!offsetAlive[i]) continue;
                 Vector2Int pos = origin + offsets[i];
-                
-                if (pos.x < 0 || pos.x >= caController.width || 
-                    pos.y < 0 || pos.y >= caController.height)
-                    continue;
-
+                if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) continue;
                 int index = pos.y * caController.width + pos.x;
-                
-                // Check if this cell went from empty to solid (CA grew into player)
-                bool wasEmpty = !IsSolidInSnapshot(previousSnapshot[index]);
-                bool nowSolid = IsSolidInSnapshot(currentData[index]);
-                
+                bool wasEmpty = !caController.IsSolid(previousSnapshot[index]);
+                bool nowSolid = caController.IsSolid(currentData[index]);
                 if (wasEmpty && nowSolid)
                 {
-                    // CA grew into this player cell - it's eaten
                     offsetAlive[i] = false;
                     anyEaten = true;
-                    
-                    if (i == vitalOffsetIndex)
-                        vitalEaten = true;
+                    if (i == vitalOffsetIndex) vitalEaten = true;
                 }
             }
 
-            // Update previous snapshot for next comparison
-            currentData.CopyTo(previousSnapshot);
+            Array.Copy(currentData, previousSnapshot, currentData.Length);
 
             if (vitalEaten)
             {
@@ -260,11 +187,8 @@ public class PlayerController : MonoBehaviour
 
             if (anyEaten)
             {
-                // Redistribute remaining cells to compact the body
                 RedistributeAliveSegments();
                 UploadAliveBuffer();
-                
-                // Clear and redraw with new shape
                 ClearPlayer(prevOrigin);
                 DrawPlayer();
             }
@@ -274,11 +198,9 @@ public class PlayerController : MonoBehaviour
     void DrawPlayer()
     {
         RenderTexture world = caController.CurrentTexture;
-        if (world == null || offsetsBuffer == null)
-            return;
+        if (world == null || offsetsBuffer == null) return;
 
         var shader = caController.cellularAutomaton;
-
         shader.SetTexture(kernelPlayerDraw, "World", world);
         shader.SetBuffer(kernelPlayerDraw, "PlayerOffsets", offsetsBuffer);
         shader.SetBuffer(kernelPlayerDraw, "PlayerAlive", aliveBuffer);
@@ -288,26 +210,22 @@ public class PlayerController : MonoBehaviour
         shader.SetVector("VitalColor", vitalColor);
         shader.SetInt("VitalOffsetIndex", vitalOffsetIndex);
         shader.SetInt("PlayerRedistributeEnabled", 0);
-        shader.SetFloat("PlayerRedistributeFactor", 0.0f);
-
+        shader.SetFloat("PlayerRedistributeFactor", 0f);
         Dispatch(kernelPlayerDraw);
     }
 
     void ClearPlayer(Vector2Int atOrigin)
     {
         RenderTexture world = caController.CurrentTexture;
-        if (world == null || offsetsBuffer == null)
-            return;
+        if (world == null || offsetsBuffer == null) return;
 
         var shader = caController.cellularAutomaton;
-
         shader.SetTexture(kernelPlayerClear, "World", world);
         shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffer);
         shader.SetInt("PlayerOffsetCount", offsetCount);
         shader.SetInts("PlayerPrevOrigin", atOrigin.x, atOrigin.y);
         shader.SetInt("PlayerRedistributeEnabled", 0);
-        shader.SetFloat("PlayerRedistributeFactor", 0.0f);
-
+        shader.SetFloat("PlayerRedistributeFactor", 0f);
         Dispatch(kernelPlayerClear);
     }
 
@@ -315,20 +233,14 @@ public class PlayerController : MonoBehaviour
     {
         var list = new List<Vector2Int>();
         int r2 = radius * radius;
-
         for (int y = -radius; y <= radius; y++)
-        {
             for (int x = -radius; x <= radius; x++)
-            {
                 if (x * x + y * y <= r2)
                     list.Add(new Vector2Int(x, y));
-            }
-        }
 
         offsets = list.ToArray();
         offsetCount = offsets.Length;
 
-        // Build preferred ordering (center outward) for redistribution
         preferredOffsets = new Vector2Int[offsetCount];
         Array.Copy(offsets, preferredOffsets, offsetCount);
         Array.Sort(preferredOffsets, (a, b) =>
@@ -342,14 +254,11 @@ public class PlayerController : MonoBehaviour
 
         offsetAlive = new bool[offsetCount];
         aliveInts = new int[offsetCount];
-
         for (int i = 0; i < offsetCount; i++)
         {
             offsetAlive[i] = true;
             aliveInts[i] = 1;
-
-            if (offsets[i] == Vector2Int.zero)
-                vitalOffsetIndex = i;
+            if (offsets[i] == Vector2Int.zero) vitalOffsetIndex = i;
         }
 
         offsetsBuffer?.Release();
@@ -363,120 +272,73 @@ public class PlayerController : MonoBehaviour
 
     void UploadAliveBuffer()
     {
-        for (int i = 0; i < offsetCount; i++)
-            aliveInts[i] = offsetAlive[i] ? 1 : 0;
-
+        for (int i = 0; i < offsetCount; i++) aliveInts[i] = offsetAlive[i] ? 1 : 0;
         aliveBuffer.SetData(aliveInts);
     }
 
     void RedistributeAliveSegments()
     {
-        int aliveCountNow = 0;
-        for (int i = 0; i < offsetCount; i++) 
-            if (offsetAlive[i]) 
-                aliveCountNow++;
+        int aliveCount = 0;
+        for (int i = 0; i < offsetCount; i++) if (offsetAlive[i]) aliveCount++;
+        if (aliveCount == 0) return;
 
-        if (aliveCountNow == 0)
-            return;
-
-        // Pack alive cells into the most compact arrangement
         var newOffsets = new Vector2Int[offsetCount];
         var newAlive = new bool[offsetCount];
-
         for (int i = 0; i < offsetCount; i++)
         {
             newOffsets[i] = preferredOffsets[i];
-            newAlive[i] = i < aliveCountNow;
+            newAlive[i] = i < aliveCount;
         }
 
-        // Find new vital offset index (should be 0 since preferredOffsets[0] is center)
         vitalOffsetIndex = -1;
         for (int i = 0; i < offsetCount; i++)
-        {
             if (newOffsets[i] == Vector2Int.zero)
             {
                 vitalOffsetIndex = i;
                 break;
             }
-        }
 
         offsets = newOffsets;
         offsetAlive = newAlive;
-
         offsetsBuffer.SetData(offsets);
         UploadAliveBuffer();
     }
 
     void RequestSnapshot()
     {
-        if (caController.CurrentTexture == null)
-            return;
-
-        AsyncGPUReadback.Request(caController.CurrentTexture, 0, request =>
+        caController.RequestColorData(data =>
         {
-            if (request.hasError)
-                return;
-
-            var data = request.GetData<Color>();
-
+            if (data == null) return;
             if (solidSnapshot == null || solidSnapshot.Length != data.Length)
                 solidSnapshot = new Color[data.Length];
-
-            data.CopyTo(solidSnapshot);
+            data.CopyTo(solidSnapshot, 0);
             snapshotReady = true;
-            
-            // Initialize previous snapshot if this is the first time
+
             if (previousSnapshot == null)
             {
                 previousSnapshot = new Color[data.Length];
-                data.CopyTo(previousSnapshot);
+                data.CopyTo(previousSnapshot, 0);
             }
         });
     }
 
     void Die(Vector2Int atOrigin)
     {
-        if (isDead)
-            return;
-
+        if (isDead) return;
         isDead = true;
-
-        for (int i = 0; i < offsetCount; i++)
-            offsetAlive[i] = false;
-
+        for (int i = 0; i < offsetCount; i++) offsetAlive[i] = false;
         UploadAliveBuffer();
-
         ClearPlayer(atOrigin);
         ClearPlayer(origin);
-
         Debug.Log("CA-REAPER: Vital cell eaten - player died.");
         OnPlayerDied?.Invoke();
     }
 
-    bool IsSolidInSnapshot(Color cell)
-    {
-        float a = cell.a;
-
-        // Check for gun CA (alpha 20-30)
-        if (a >= 20.0f && a < 30.0f)
-            return true;
-
-        // Check for main CA
-        if (caController.Decay > 1)
-            return a > 0.5f && a < caController.Decay - 0.5f;
-
-        return a > 0.5f;
-    }
-
     bool IsSolidAt(int x, int y)
     {
-        if (x < 0 || x >= caController.width || y < 0 || y >= caController.height)
-            return true; // world edge acts as a wall
-
-        if (!snapshotReady)
-            return false;
-
-        return IsSolidInSnapshot(solidSnapshot[y * caController.width + x]);
+        if (x < 0 || x >= caController.width || y < 0 || y >= caController.height) return true;
+        if (!snapshotReady) return false;
+        return caController.IsSolid(solidSnapshot[y * caController.width + x]);
     }
 
     void OnDestroy()
