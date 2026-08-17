@@ -1,13 +1,16 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using System;
 
 public class GunController : MonoBehaviour
 {
     public CAController caController;
+    public EnemyManager enemyManager;
     public Transform muzzle;
     public string rules = "";
     public Vector3 automatonID = new Vector3(1f, 0f, 0f);
+    public event Action<Vector2Int, int> OnShotFired;
     public int fireRate = 1;
     public int AOE = 1;
     public int spread = 0;
@@ -116,7 +119,7 @@ public class GunController : MonoBehaviour
             audio.Play();
         }
 
-        Vector2 rayDirection = transform.right + new Vector3(0f, Random.Range(-spread, spread) * 0.01f, 0f);
+        Vector2 rayDirection = transform.right + new Vector3(0f, UnityEngine.Random.Range(-spread, spread) * 0.01f, 0f);
         Vector2 rayOrigin = muzzle.position;
 
         Vector2Int? hitCell = RaycastThroughGrid(rayOrigin, rayDirection);
@@ -124,9 +127,10 @@ public class GunController : MonoBehaviour
         {
             Vector2Int gridPos = hitCell.Value;
             Vector3 worldPos = GridToWorld(gridPos);
-            Debug.Log($"Hit cell at grid position: {gridPos}");
+            //Debug.Log($"Hit cell at grid position: {gridPos}");
             ShowShotLine(rayOrigin, worldPos);
             ImpactAt(gridPos);
+            OnShotFired?.Invoke(gridPos, AOE);
         }
         else
         {
@@ -138,11 +142,10 @@ public class GunController : MonoBehaviour
 
     Vector2Int? RaycastThroughGrid(Vector2 origin, Vector2 direction)
     {
-        // Use cached snapshot from CAController if available
         if (caController.LatestSnapshot == null) return null;
 
         Vector2Int currentGrid = WorldToGrid(origin);
-        if (IsCellAlive(currentGrid)) return currentGrid;
+        if (IsCellBlocking(currentGrid)) return currentGrid;
 
         float stepX = direction.x >= 0 ? 1 : -1;
         float stepY = direction.y >= 0 ? 1 : -1;
@@ -190,10 +193,23 @@ public class GunController : MonoBehaviour
                 currentGrid.y < 0 || currentGrid.y >= caController.height)
                 return null;
 
-            if (IsCellAlive(currentGrid))
+            if (IsCellBlocking(currentGrid))
                 return currentGrid;
         }
         return null;
+    }
+
+    bool IsCellBlocking(Vector2Int pos)
+    {
+        // Check if there's a solid CA cell here
+        if (IsCellAlive(pos))
+            return true;
+        
+        // Check if there's an enemy cell here
+        if (enemyManager != null && enemyManager.IsCellOccupiedByEnemy(pos))
+            return true;
+        
+        return false;
     }
 
     void ImpactAt(Vector2Int impactPoint)
@@ -276,22 +292,22 @@ public class GunController : MonoBehaviour
         {
             string birthStr = GenerateRuleDigits(true);
             string survivalStr = GenerateRuleDigits(false);
-            int decayNum = Random.Range(0, 8);
+            int decayNum = UnityEngine.Random.Range(0, 8);
             rules = $"{birthStr}/{survivalStr}/{decayNum}";
         }
 
-        automatonID = new Vector3(Random.value, Random.value, Random.value);
+        automatonID = new Vector3(UnityEngine.Random.value, UnityEngine.Random.value, UnityEngine.Random.value);
         if (automatonID.x == 0 && automatonID.y == 0 && automatonID.z == 1)
             automatonID = new Vector3(1f, 1f, 1f);
 
-        fireRate = Random.Range(1, Random.value > 0.6f ? 15 : 30);
-        spread = Random.Range(0, Random.value > 0.7f ? 10 : 50);
-        AOE = Random.Range(1, 20);
+        fireRate = UnityEngine.Random.Range(1, UnityEngine.Random.value > 0.6f ? 15 : 30);
+        spread = UnityEngine.Random.Range(0, UnityEngine.Random.value > 0.7f ? 10 : 50);
+        AOE = UnityEngine.Random.Range(1, 20);
     }
 
     string GenerateRuleDigits(bool isBirth)
     {
-        int num = Random.Range(0, 88888888);
+        int num = UnityEngine.Random.Range(0, 88888888);
         string str = num.ToString();
         List<char> unique = new List<char>();
         foreach (char ch in str)

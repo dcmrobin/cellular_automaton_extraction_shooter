@@ -63,6 +63,9 @@ public class PlayerController : MonoBehaviour
     private bool drawnOnce;
     private bool collisionCheckInProgress = false;
 
+    public Vector2Int[] Offsets => offsets;
+    public bool[] OffsetAlive => offsetAlive;
+
     void Start()
     {
         kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
@@ -467,5 +470,48 @@ public class PlayerController : MonoBehaviour
                 buffer?.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// Removes player cells at the given world positions (e.g., eaten by enemy).
+    /// Handles vital death and redistribution.
+    /// </summary>
+    public void RemoveCellsAt(IEnumerable<Vector2Int> worldPositions)
+    {
+        if (isDead) return;
+
+        bool anyRemoved = false;
+        bool vitalRemoved = false;
+
+        foreach (Vector2Int pos in worldPositions)
+        {
+            for (int i = 0; i < offsetCount; i++)
+            {
+                if (!offsetAlive[i]) continue;
+                Vector2Int cellPos = origin + offsets[i];
+                if (cellPos == pos)
+                {
+                    offsetAlive[i] = false;
+                    anyRemoved = true;
+                    if (i == vitalOffsetIndex)
+                        vitalRemoved = true;
+                    break; // cell found, move to next position
+                }
+            }
+        }
+
+        if (!anyRemoved) return;
+
+        // Queue buffer update for alive changes
+        QueueBufferUpdate(false, true);
+
+        if (vitalRemoved)
+        {
+            Die(origin);
+            return;
+        }
+
+        // If vital not removed, redistribute remaining cells
+        RedistributeAliveSegments();
     }
 }

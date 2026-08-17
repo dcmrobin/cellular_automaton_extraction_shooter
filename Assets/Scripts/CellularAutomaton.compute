@@ -4,6 +4,9 @@
 #pragma kernel PlayerDraw
 #pragma kernel GunImpact
 #pragma kernel GunStep
+#pragma kernel EnemyDraw
+#pragma kernel EnemyClear
+#pragma kernel EnemyImpact
 
 RWTexture2D<float4> Result;
 Texture2D<float4> Current;
@@ -325,5 +328,78 @@ void PlayerDraw(uint3 id : SV_DispatchThreadID)
     {
         float3 color = ((int)id.x == VitalOffsetIndex) ? VitalColor.rgb : PlayerColor.rgb;
         World[pos] = float4(color, existing.a);
+    }
+}
+
+// Enemy buffers and uniforms
+StructuredBuffer<int2> EnemyOffsets;
+StructuredBuffer<int> EnemyAlive;
+int EnemyOffsetCount;
+int2 EnemyOrigin;
+int2 EnemyPrevOrigin;
+float4 EnemyColor;
+float4 EnemyVitalColor;
+int EnemyVitalOffsetIndex;
+int EnemyVitalHit;      // 1 if enemy vital was within radius, else 0
+
+// ------------------------------------------------------------------
+// Enemy Draw
+// ------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void EnemyDraw(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= EnemyOffsetCount) return;
+    if (EnemyAlive[id.x] == 0) return;
+
+    int2 offset = EnemyOffsets[id.x];
+    int2 pos = EnemyOrigin + offset;
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
+
+    float4 existing = World[pos];
+    // Draw over any cell (including solid main CA) but preserve alpha
+    float3 color = ((int)id.x == EnemyVitalOffsetIndex) ? EnemyVitalColor.rgb : EnemyColor.rgb;
+    World[pos] = float4(color, existing.a);
+}
+
+// ------------------------------------------------------------------
+// Enemy Clear
+// ------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void EnemyClear(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= EnemyOffsetCount) return;
+
+    int2 offset = EnemyOffsets[id.x];
+    int2 pos = EnemyPrevOrigin + offset;
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
+
+    float4 existing = World[pos];
+    // Restore original color (black) but keep the alpha (CA state)
+    World[pos] = float4(0, 0, 0, existing.a);
+}
+
+// ------------------------------------------------------------------
+// Enemy Impact (called when a gun shot hits this enemy)
+// ------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void EnemyImpact(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= EnemyOffsetCount) return;
+    if (EnemyAlive[id.x] == 0) return;
+
+    int2 offset = EnemyOffsets[id.x];
+    int2 pos = EnemyOrigin + offset;
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
+
+    float dist = distance(float2(pos), float2(GunImpactCenter));
+    if (dist <= GunImpactRadius)
+    {
+        // Convert to gun CA
+        World[pos] = float4(CurrentGunAutomatonID.rgb, 20.0);
+    }
+    else if (EnemyVitalHit == 1)
+    {
+        // Vital was hit, convert remaining cells to main CA
+        World[pos] = float4(AutomatonID.rgb, 1.0);
     }
 }
