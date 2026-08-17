@@ -6,10 +6,12 @@ using UnityEngine.Rendering;
 public class GunController : MonoBehaviour
 {
     public CAController caController;
+    public Transform muzzle;
     public string rules = "";
     public Vector3 automatonID = new Vector3(1f, 0f, 0f);
     public int fireRate = 1;
     public int AOE = 1;
+    public int spread = 0;
     public int Decay { get; private set; }
 
     private int kernelGunImpact;
@@ -111,7 +113,7 @@ public class GunController : MonoBehaviour
         
         fireCooldown -= Time.deltaTime;
         
-        if (Input.GetMouseButtonDown(0) && fireCooldown <= 0)
+        if (Input.GetMouseButton(0) && fireCooldown <= 0)
         {
             FireGun();
             fireCooldown = 1f / Mathf.Max(1, fireRate);
@@ -120,8 +122,19 @@ public class GunController : MonoBehaviour
 
     public void FireGun() 
     {
-        Vector2 rayDirection = transform.right;
-        Vector2 rayOrigin = transform.position;
+        var audio = GetComponent<AudioSource>();
+        if (audio != null)
+        {
+            float minAOE = 1f;
+            float maxAOE = 20f;
+            float minPitch = 0.1f;
+            float maxPitch = 2f;
+            float t = Mathf.Clamp01((AOE - minAOE) / (maxAOE - minAOE));
+            audio.pitch = Mathf.Lerp(maxPitch, minPitch, t);
+            audio.Play();
+        }
+        Vector2 rayDirection = transform.right + new Vector3(0f, Random.Range(-spread, spread) * 0.01f, 0f);
+        Vector2 rayOrigin = muzzle.position;
         
         Vector2Int? hitCell = RaycastThroughGrid(rayOrigin, rayDirection);
         
@@ -370,7 +383,8 @@ public class GunController : MonoBehaviour
         {
             automatonID = new Vector3(1f, 1f, 1f);
         }
-        fireRate = UnityEngine.Random.Range(1, 50);
+        fireRate = UnityEngine.Random.Range(1, UnityEngine.Random.value > 0.6f ? 15 : 30);
+        spread = UnityEngine.Random.Range(0, UnityEngine.Random.value > 0.7f ? 10 : 50);
         AOE = UnityEngine.Random.Range(1, 20);
     }
 
