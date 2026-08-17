@@ -26,8 +26,8 @@ public class GunController : MonoBehaviour
     [Header("Raycast Settings")]
     public float maxShotDistance = 50f;
 
-    private Color[] caSnapshot;
     private bool snapshotReady;
+    private bool readbackInProgress = false;
 
     void Start()
     {
@@ -51,7 +51,6 @@ public class GunController : MonoBehaviour
         }
 
         SetupShotLine();
-        InvokeRepeating(nameof(UpdateSnapshot), 0.1f, 0.1f);
         caController.OnCAStepped += StepGunCA;
     }
 
@@ -60,16 +59,20 @@ public class GunController : MonoBehaviour
         caController.OnCAStepped -= StepGunCA;
     }
 
-    void UpdateSnapshot()
+    void RequestSnapshotIfNeeded()
     {
-        caController.RequestColorData(data =>
+        if (!snapshotReady && !readbackInProgress)
         {
-            if (data != null)
+            readbackInProgress = true;
+            caController.RequestColorData(data =>
             {
-                caSnapshot = data;
-                snapshotReady = true;
-            }
-        });
+                readbackInProgress = false;
+                if (data != null)
+                {
+                    snapshotReady = true;
+                }
+            });
+        }
     }
 
     void SetupShotLine()
@@ -96,6 +99,8 @@ public class GunController : MonoBehaviour
         fireCooldown -= Time.deltaTime;
         if (Input.GetMouseButton(0) && fireCooldown <= 0)
         {
+            // Request fresh snapshot before firing if we don't have one
+            RequestSnapshotIfNeeded();
             FireGun();
             fireCooldown = 1f / Mathf.Max(1, fireRate);
         }
@@ -133,7 +138,8 @@ public class GunController : MonoBehaviour
 
     Vector2Int? RaycastThroughGrid(Vector2 origin, Vector2 direction)
     {
-        if (!snapshotReady) return null;
+        // Use cached snapshot from CAController if available
+        if (caController.LatestSnapshot == null) return null;
 
         Vector2Int currentGrid = WorldToGrid(origin);
         if (IsCellAlive(currentGrid)) return currentGrid;
@@ -204,15 +210,14 @@ public class GunController : MonoBehaviour
         int groupsY = Mathf.CeilToInt(caController.height / 8f);
 
         caController.ModifyTextureDirect(kernelGunImpact, groupsX, groupsY);
-        UpdateSnapshot();
     }
 
     bool HasGunCACells()
     {
-        if (!snapshotReady) return false;
-        for (int i = 0; i < caSnapshot.Length; i++)
+        if (caController.LatestSnapshot == null) return false;
+        for (int i = 0; i < caController.LatestSnapshot.Length; i++)
         {
-            if (caController.IsGunCA(caSnapshot[i]))
+            if (caController.IsGunCA(caController.LatestSnapshot[i]))
                 return true;
         }
         return false;
@@ -226,7 +231,6 @@ public class GunController : MonoBehaviour
         int groupsY = Mathf.CeilToInt(caController.height / 8f);
 
         caController.ModifyTextureDirect(kernelGunStep, groupsX, groupsY);
-        UpdateSnapshot();
     }
 
     void ShowShotLine(Vector3 start, Vector3 end)
@@ -245,9 +249,9 @@ public class GunController : MonoBehaviour
 
     bool IsCellAlive(Vector2Int pos)
     {
-        if (!snapshotReady) return false;
+        if (caController.LatestSnapshot == null) return false;
         if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) return false;
-        return caController.IsSolid(caSnapshot[pos.y * caController.width + pos.x]);
+        return caController.IsSolid(caController.LatestSnapshot[pos.y * caController.width + pos.x]);
     }
 
     Vector2Int WorldToGrid(Vector3 worldPos)

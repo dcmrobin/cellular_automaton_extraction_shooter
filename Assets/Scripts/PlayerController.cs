@@ -43,8 +43,16 @@ public class PlayerController : MonoBehaviour
     private int offsetCount;
     private int vitalOffsetIndex = -1;
 
-    private ComputeBuffer offsetsBuffer;
-    private ComputeBuffer aliveBuffer;
+    // Double buffering for compute buffers
+    private ComputeBuffer[] offsetsBuffers;
+    private ComputeBuffer[] aliveBuffers;
+    private int currentBufferIndex = 0;
+    private int nextBufferIndex = 1;
+    
+    // Deferred update flags
+    private bool buffersNeedUpdate = false;
+    private bool offsetsChanged = false;
+    private bool aliveChanged = false;
 
     private int kernelPlayerClear;
     private int kernelPlayerDraw;
@@ -53,6 +61,7 @@ public class PlayerController : MonoBehaviour
     private Color[] previousSnapshot;
     private bool snapshotReady;
     private bool drawnOnce;
+    private bool collisionCheckInProgress = false;
 
     void Start()
     {
@@ -70,7 +79,7 @@ public class PlayerController : MonoBehaviour
         BuildOffsetsBuffer();
     }
 
-    void Dispatch(int kernel)
+    void Dispatch(int kernel, int bufferIndex)
     {
         if (kernel < 0) return;
         int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
@@ -85,6 +94,15 @@ public class PlayerController : MonoBehaviour
     void OnDisable()
     {
         if (caController != null) caController.OnCAStepped -= HandleCAStepped;
+    }
+
+    void LateUpdate()
+    {
+        // Apply deferred buffer updates at end of frame to minimize sync points
+        if (buffersNeedUpdate)
+        {
+            ApplyBufferUpdates();
+        }
     }
 
     void Update()
@@ -131,32 +149,70 @@ public class PlayerController : MonoBehaviour
 
     bool CanFitAt(Vector2Int newOrigin)
     {
-        for (int i = 0; i < offsetCount; i++)
+        // Use cached snapshot if available
+        if (caController.LatestSnapshot != null)
         {
-            if (!offsetAlive[i]) continue;
-            Vector2Int pos = newOrigin + offsets[i];
-            if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) return false;
-            if (IsSolidAt(pos.x, pos.y)) return false;
+            for (int i = 0; i < offsetCount; i++)
+            {
+                if (!offsetAlive[i]) continue;
+                Vector2Int pos = newOrigin + offsets[i];
+                if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) return false;
+                if (caController.IsSolid(caController.LatestSnapshot[pos.y * caController.width + pos.x])) return false;
+            }
+            return true;
         }
-        return true;
+        else if (snapshotReady)
+        {
+            // Fallback to local snapshot
+            for (int i = 0; i < offsetCount; i++)
+            {
+                if (!offsetAlive[i]) continue;
+                Vector2Int pos = newOrigin + offsets[i];
+                if (pos.x < 0 || pos.x >= caController.width || pos.y < 0 || pos.y >= caController.height) return false;
+                if (caController.IsSolid(solidSnapshot[pos.y * caController.width + pos.x])) return false;
+            }
+            return true;
+        }
+        return true; // If no snapshot available, allow movement
     }
 
     void HandleCAStepped()
     {
         if (isDead) return;
-        CheckForCAEatingPlayer();
+        
+        // Only check for collision if we're not already checking
+        if (!collisionCheckInProgress)
+        {
+            CheckForCAEatingPlayer();
+        }
+        
         DrawPlayer();
         prevOrigin = origin;
-        RequestSnapshot();
     }
 
     void CheckForCAEatingPlayer()
     {
-        if (!snapshotReady || previousSnapshot == null) return;
-
+        if (collisionCheckInProgress) return;
+        
+        collisionCheckInProgress = true;
+        
+        // Use the centralized readback system
         caController.RequestColorData(currentData =>
         {
+            collisionCheckInProgress = false;
+            
             if (currentData == null) return;
+            if (!snapshotReady || previousSnapshot == null)
+            {
+                // First snapshot, just store it
+                if (previousSnapshot == null)
+                {
+                    previousSnapshot = new Color[currentData.Length];
+                    currentData.CopyTo(previousSnapshot, 0);
+                }
+                snapshotReady = true;
+                return;
+            }
 
             bool anyEaten = false;
             bool vitalEaten = false;
@@ -178,6 +234,7 @@ public class PlayerController : MonoBehaviour
             }
 
             Array.Copy(currentData, previousSnapshot, currentData.Length);
+            snapshotReady = true;
 
             if (vitalEaten)
             {
@@ -188,7 +245,6 @@ public class PlayerController : MonoBehaviour
             if (anyEaten)
             {
                 RedistributeAliveSegments();
-                UploadAliveBuffer();
                 ClearPlayer(prevOrigin);
                 DrawPlayer();
             }
@@ -198,12 +254,14 @@ public class PlayerController : MonoBehaviour
     void DrawPlayer()
     {
         RenderTexture world = caController.CurrentTexture;
-        if (world == null || offsetsBuffer == null) return;
+        if (world == null) return;
 
         var shader = caController.cellularAutomaton;
+        int bufferIdx = GetCurrentBufferIndex();
+        
         shader.SetTexture(kernelPlayerDraw, "World", world);
-        shader.SetBuffer(kernelPlayerDraw, "PlayerOffsets", offsetsBuffer);
-        shader.SetBuffer(kernelPlayerDraw, "PlayerAlive", aliveBuffer);
+        shader.SetBuffer(kernelPlayerDraw, "PlayerOffsets", offsetsBuffers[bufferIdx]);
+        shader.SetBuffer(kernelPlayerDraw, "PlayerAlive", aliveBuffers[bufferIdx]);
         shader.SetInt("PlayerOffsetCount", offsetCount);
         shader.SetInts("PlayerOrigin", origin.x, origin.y);
         shader.SetVector("PlayerColor", playerColor);
@@ -211,22 +269,24 @@ public class PlayerController : MonoBehaviour
         shader.SetInt("VitalOffsetIndex", vitalOffsetIndex);
         shader.SetInt("PlayerRedistributeEnabled", 0);
         shader.SetFloat("PlayerRedistributeFactor", 0f);
-        Dispatch(kernelPlayerDraw);
+        Dispatch(kernelPlayerDraw, bufferIdx);
     }
 
     void ClearPlayer(Vector2Int atOrigin)
     {
         RenderTexture world = caController.CurrentTexture;
-        if (world == null || offsetsBuffer == null) return;
+        if (world == null) return;
 
         var shader = caController.cellularAutomaton;
+        int bufferIdx = GetCurrentBufferIndex();
+        
         shader.SetTexture(kernelPlayerClear, "World", world);
-        shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffer);
+        shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffers[bufferIdx]);
         shader.SetInt("PlayerOffsetCount", offsetCount);
         shader.SetInts("PlayerPrevOrigin", atOrigin.x, atOrigin.y);
         shader.SetInt("PlayerRedistributeEnabled", 0);
         shader.SetFloat("PlayerRedistributeFactor", 0f);
-        Dispatch(kernelPlayerClear);
+        Dispatch(kernelPlayerClear, bufferIdx);
     }
 
     void BuildOffsetsBuffer()
@@ -261,19 +321,59 @@ public class PlayerController : MonoBehaviour
             if (offsets[i] == Vector2Int.zero) vitalOffsetIndex = i;
         }
 
-        offsetsBuffer?.Release();
-        offsetsBuffer = new ComputeBuffer(offsetCount, sizeof(int) * 2);
-        offsetsBuffer.SetData(offsets);
-
-        aliveBuffer?.Release();
-        aliveBuffer = new ComputeBuffer(offsetCount, sizeof(int));
-        aliveBuffer.SetData(aliveInts);
+        // Create double-buffered compute buffers
+        offsetsBuffers = new ComputeBuffer[2];
+        aliveBuffers = new ComputeBuffer[2];
+        
+        for (int i = 0; i < 2; i++)
+        {
+            offsetsBuffers[i] = new ComputeBuffer(offsetCount, sizeof(int) * 2);
+            offsetsBuffers[i].SetData(offsets);
+            
+            aliveBuffers[i] = new ComputeBuffer(offsetCount, sizeof(int));
+            aliveBuffers[i].SetData(aliveInts);
+        }
+        
+        currentBufferIndex = 0;
+        nextBufferIndex = 1;
     }
 
-    void UploadAliveBuffer()
+    int GetCurrentBufferIndex()
     {
-        for (int i = 0; i < offsetCount; i++) aliveInts[i] = offsetAlive[i] ? 1 : 0;
-        aliveBuffer.SetData(aliveInts);
+        return currentBufferIndex;
+    }
+
+    void ApplyBufferUpdates()
+    {
+        if (!buffersNeedUpdate) return;
+        
+        // Swap buffer indices
+        int temp = currentBufferIndex;
+        currentBufferIndex = nextBufferIndex;
+        nextBufferIndex = temp;
+        
+        // Update the buffer that will be used next frame
+        if (offsetsChanged)
+        {
+            offsetsBuffers[nextBufferIndex].SetData(offsets);
+            offsetsChanged = false;
+        }
+        
+        if (aliveChanged)
+        {
+            for (int i = 0; i < offsetCount; i++) aliveInts[i] = offsetAlive[i] ? 1 : 0;
+            aliveBuffers[nextBufferIndex].SetData(aliveInts);
+            aliveChanged = false;
+        }
+        
+        buffersNeedUpdate = false;
+    }
+
+    void QueueBufferUpdate(bool offsetsNeedUpdate, bool aliveNeedUpdate)
+    {
+        offsetsChanged |= offsetsNeedUpdate;
+        aliveChanged |= aliveNeedUpdate;
+        buffersNeedUpdate = true;
     }
 
     void RedistributeAliveSegments()
@@ -300,8 +400,9 @@ public class PlayerController : MonoBehaviour
 
         offsets = newOffsets;
         offsetAlive = newAlive;
-        offsetsBuffer.SetData(offsets);
-        UploadAliveBuffer();
+        
+        // Queue buffer updates instead of immediate SetData
+        QueueBufferUpdate(true, true);
     }
 
     void RequestSnapshot()
@@ -327,7 +428,10 @@ public class PlayerController : MonoBehaviour
         if (isDead) return;
         isDead = true;
         for (int i = 0; i < offsetCount; i++) offsetAlive[i] = false;
-        UploadAliveBuffer();
+        
+        // Queue buffer update instead of immediate SetData
+        QueueBufferUpdate(false, true);
+        
         ClearPlayer(atOrigin);
         ClearPlayer(origin);
         Debug.Log("CA-REAPER: Vital cell eaten - player died.");
@@ -337,13 +441,31 @@ public class PlayerController : MonoBehaviour
     bool IsSolidAt(int x, int y)
     {
         if (x < 0 || x >= caController.width || y < 0 || y >= caController.height) return true;
+        
+        // Use cached snapshot if available
+        if (caController.LatestSnapshot != null)
+            return caController.IsSolid(caController.LatestSnapshot[y * caController.width + x]);
+        
         if (!snapshotReady) return false;
         return caController.IsSolid(solidSnapshot[y * caController.width + x]);
     }
 
     void OnDestroy()
     {
-        offsetsBuffer?.Release();
-        aliveBuffer?.Release();
+        if (offsetsBuffers != null)
+        {
+            foreach (var buffer in offsetsBuffers)
+            {
+                buffer?.Release();
+            }
+        }
+        
+        if (aliveBuffers != null)
+        {
+            foreach (var buffer in aliveBuffers)
+            {
+                buffer?.Release();
+            }
+        }
     }
 }

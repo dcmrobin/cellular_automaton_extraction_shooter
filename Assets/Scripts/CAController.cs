@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -30,9 +31,11 @@ public class CAController : MonoBehaviour
 
     public RenderTexture CurrentTexture => current;
     public int Decay { get; private set; }
+    public Color[] LatestSnapshot { get; private set; }
 
     private RenderTexture current;
     private RenderTexture next;
+    private RenderTexture tempOutput; // Persistent temp texture for direct modifications
 
     private int kernelInit = -1;
     private int kernelStep = -1;
@@ -42,6 +45,10 @@ public class CAController : MonoBehaviour
     private int kernelGunStep = -1;
 
     private float timer;
+
+    // Readback management
+    private bool readbackInProgress = false;
+    private List<Action<Color[]>> pendingCallbacks = new List<Action<Color[]>>();
 
     void Awake()
     {
@@ -54,6 +61,7 @@ public class CAController : MonoBehaviour
 
         current = CreateRenderTexture();
         next = CreateRenderTexture();
+        tempOutput = CreateRenderTexture(); // Create persistent temp texture
 
         SetupComputeShader();
         Initialize();
@@ -191,16 +199,16 @@ public class CAController : MonoBehaviour
             return;
         }
 
-        RenderTexture tempOutput = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGBFloat);
-        tempOutput.enableRandomWrite = true;
-        tempOutput.Create();
-
+        // Use persistent tempOutput instead of creating new temporary texture
         cellularAutomaton.SetTexture(kernel, "Current", current);
         cellularAutomaton.SetTexture(kernel, "Result", tempOutput);
         cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
 
-        Graphics.Blit(tempOutput, current);
-        RenderTexture.ReleaseTemporary(tempOutput);
+        // Swap current and tempOutput so the result becomes the new current
+        RenderTexture swap = current;
+        current = tempOutput;
+        tempOutput = swap;
+
         targetRenderer.material.mainTexture = current;
     }
 
@@ -228,17 +236,33 @@ public class CAController : MonoBehaviour
             return;
         }
 
+        // Add callback to pending list
+        pendingCallbacks.Add(callback);
+        
+        // If a readback is already in progress, just queue the callback
+        if (readbackInProgress) return;
+
+        readbackInProgress = true;
         AsyncGPUReadback.Request(CurrentTexture, 0, request =>
         {
-            if (request.hasError)
+            Color[] data = null;
+            if (!request.hasError)
             {
-                callback?.Invoke(null);
-                return;
+                var raw = request.GetData<Color>();
+                data = new Color[raw.Length];
+                raw.CopyTo(data);
+                LatestSnapshot = data; // Cache the latest snapshot
             }
-            var data = request.GetData<Color>();
-            Color[] copy = new Color[data.Length];
-            data.CopyTo(copy);
-            callback?.Invoke(copy);
+
+            // Distribute data to all queued callbacks
+            var callbacks = pendingCallbacks;
+            pendingCallbacks = new List<Action<Color[]>>();
+            readbackInProgress = false;
+
+            foreach (var cb in callbacks)
+            {
+                cb?.Invoke(data);
+            }
         });
     }
 
@@ -266,5 +290,6 @@ public class CAController : MonoBehaviour
     {
         if (current != null) current.Release();
         if (next != null) next.Release();
+        if (tempOutput != null) tempOutput.Release();
     }
 }
