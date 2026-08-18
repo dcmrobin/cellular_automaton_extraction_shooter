@@ -7,6 +7,9 @@
 #pragma kernel EnemyDraw
 #pragma kernel EnemyClear
 #pragma kernel EnemyImpact
+#pragma kernel ScanForGuns
+#pragma kernel ClearGunCells
+#pragma kernel ClearPositions
 
 RWTexture2D<float4> Result;
 Texture2D<float4> Current;
@@ -402,4 +405,273 @@ void EnemyImpact(uint3 id : SV_DispatchThreadID)
         // Vital was hit, convert remaining cells to main CA
         World[pos] = float4(AutomatonID.rgb, 1.0);
     }
+}
+
+StructuredBuffer<int2> PositionsToClear;
+int ClearCount;
+[numthreads(64, 1, 1)]
+void ClearPositions(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= ClearCount) return;
+    int2 pos = PositionsToClear[id.x];
+    if (pos.x < 0 || pos.x >= Width || pos.y < 0 || pos.y >= Height) return;
+    float deadState = (Decay > 1) ? (float)Decay : 0.0;
+    World[pos] = float4(0, 0, 0, deadState);
+}
+
+// Gun scanning uniforms
+Texture2D<float4> TemplateTexture;
+int TemplateWidth;
+int TemplateHeight;
+int ScanStride;
+float MatchThreshold;
+
+// Output buffers for matches
+struct MatchResult
+{
+    int2 center;
+    int cellCount;
+    int minX;
+    int maxX;
+    int minY;
+    int maxY;
+};
+
+RWStructuredBuffer<MatchResult> MatchResults;
+RWStructuredBuffer<int> MatchCount;
+RWStructuredBuffer<int2> GunCellsToClear;
+
+// Maximum matches and cells to clear
+#define MAX_MATCHES 256
+#define MAX_CELLS_TO_CLEAR 4096
+
+// ------------------------------------------------------------------
+// CheckTemplateMatch - Checks overlap with template (NO ROTATION)
+// ------------------------------------------------------------------
+float CheckTemplateMatch(int startX, int startY)
+{
+    float total = 0;
+    float matched = 0;
+    
+    for (int y = 0; y < TemplateHeight; y++)
+    {
+        for (int x = 0; x < TemplateWidth; x++)
+        {
+            float4 templatePixel = TemplateTexture[int2(x, y)];
+            bool templateSolid = templatePixel.r > 0.5f;
+            if (!templateSolid) continue;
+            
+            total++;
+            
+            int2 worldPos = int2(startX + x, startY + y);
+            if (worldPos.x >= 0 && worldPos.x < Width && 
+                worldPos.y >= 0 && worldPos.y < Height)
+            {
+                float4 cell = World[worldPos];
+                if (IsMainCASolid(cell))
+                {
+                    matched++;
+                }
+            }
+        }
+    }
+    
+    return total > 0 ? matched / total : 0;
+}
+
+// ------------------------------------------------------------------
+// ScanForGuns Kernel - Finds gun shapes in the CA
+// ------------------------------------------------------------------
+[numthreads(8, 8, 1)]
+void ScanForGuns(uint3 id : SV_DispatchThreadID)
+{
+    int startX = id.x * ScanStride;
+    int startY = id.y * ScanStride;
+    
+    // Bounds check
+    if (startX + TemplateWidth >= Width || startY + TemplateHeight >= Height) return;
+    
+    // Quick pre-check: count solid cells in the area
+    int solidCount = 0;
+    for (int y = 0; y < TemplateHeight && solidCount < 3; y++)
+    {
+        for (int x = 0; x < TemplateWidth && solidCount < 3; x++)
+        {
+            float4 templatePixel = TemplateTexture[int2(x, y)];
+            if (templatePixel.r > 0.5f)
+            {
+                int2 worldPos = int2(startX + x, startY + y);
+                float4 cell = World[worldPos];
+                if (IsMainCASolid(cell))
+                {
+                    solidCount++;
+                }
+            }
+        }
+    }
+    
+    if (solidCount < 2) return;
+    
+    // Full match check (only original orientation - no rotation)
+    float match = CheckTemplateMatch(startX, startY);
+    
+    if (match >= MatchThreshold)
+    {
+        int idx;
+        InterlockedAdd(MatchCount[0], 1, idx);
+        
+        if (idx < MAX_MATCHES)
+        {
+            MatchResult result;
+            int2 center = int2(startX + TemplateWidth/2, startY + TemplateHeight/2);
+            result.center = center;
+            
+            // Store the template area as the bounds
+            result.minX = startX;
+            result.maxX = startX + TemplateWidth;
+            result.minY = startY;
+            result.maxY = startY + TemplateHeight;
+            
+            // Count cells in the template area
+            result.cellCount = 0;
+            for (int y = startY; y < startY + TemplateHeight; y++)
+            {
+                for (int x = startX; x < startX + TemplateWidth; x++)
+                {
+                    float4 cell = World[int2(x, y)];
+                    if (IsMainCASolid(cell))
+                        result.cellCount++;
+                }
+            }
+            
+            MatchResults[idx] = result;
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// ClearGunCells - Removes gun cells from the CA
+// ------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void ClearGunCells(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= MatchCount[0]) return;
+    
+    MatchResult match = MatchResults[id.x];
+    int2 center = match.center;
+    
+    // Clear all cells in the bounding box
+    for (int y = match.minY; y <= match.maxY; y++)
+    {
+        for (int x = match.minX; x <= match.maxX; x++)
+        {
+            int2 pos = int2(x, y);
+            if (pos.x >= 0 && pos.x < Width && pos.y >= 0 && pos.y < Height)
+            {
+                float4 cell = World[pos];
+                if (IsMainCASolid(cell) || IsGunCA(cell))
+                {
+                    // Clear the cell
+                    float deadState = (Decay > 1) ? (float)Decay : 0.0;
+                    World[pos] = float4(0, 0, 0, deadState);
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// CountConnectedComponent - BFS to count cells in the gun
+// ------------------------------------------------------------------
+int CountConnectedComponent(int2 startPos)
+{
+    // Use a simple stack-based flood fill
+    // Since we're in a compute shader, we'll use a fixed-size array
+    int2 stack[1024];
+    int stackSize = 0;
+    int count = 0;
+    
+    // Check if start position is solid
+    float4 startCell = World[startPos];
+    if (!IsMainCASolid(startCell) && !IsGunCA(startCell)) return 0;
+    
+    stack[stackSize++] = startPos;
+    
+    int radius = max(TemplateWidth, TemplateHeight) * 2;
+    int count2 = 0;
+    
+    for (int y = -radius; y <= radius; y++)
+    {
+        for (int x = -radius; x <= radius; x++)
+        {
+            int2 pos = startPos + int2(x, y);
+            if (pos.x >= 0 && pos.x < Width && pos.y >= 0 && pos.y < Height)
+            {
+                float4 cell = World[pos];
+                if (IsMainCASolid(cell) || IsGunCA(cell))
+                {
+                    // Check if connected (using a simpler check - within the template area)
+                    if (abs(x) < TemplateWidth * 2 && abs(y) < TemplateHeight * 2)
+                    {
+                        count2++;
+                    }
+                }
+            }
+        }
+    }
+    
+    return count2;
+}
+
+// ------------------------------------------------------------------
+// CalculateBoundingBox - Finds the extents of the gun shape
+// ------------------------------------------------------------------
+void CalculateBoundingBox(int2 center, out int minX, out int maxX, out int minY, out int maxY)
+{
+    minX = Width;
+    maxX = 0;
+    minY = Height;
+    maxY = 0;
+    
+    int radius = max(TemplateWidth, TemplateHeight) * 2;
+    
+    for (int y = -radius; y <= radius; y++)
+    {
+        for (int x = -radius; x <= radius; x++)
+        {
+            int2 pos = center + int2(x, y);
+            if (pos.x >= 0 && pos.x < Width && pos.y >= 0 && pos.y < Height)
+            {
+                float4 cell = World[pos];
+                if (IsMainCASolid(cell) || IsGunCA(cell))
+                {
+                    if (pos.x < minX) minX = pos.x;
+                    if (pos.x > maxX) maxX = pos.x;
+                    if (pos.y < minY) minY = pos.y;
+                    if (pos.y > maxY) maxY = pos.y;
+                }
+            }
+        }
+    }
+}
+
+int2 GetRotatedPos(int x, int y, int rotation, int startX, int startY)
+{
+    // Center of template
+    int cx = TemplateWidth / 2;
+    int cy = TemplateHeight / 2;
+    
+    // Translate to center
+    int tx = x - cx;
+    int ty = y - cy;
+    
+    int rx = tx, ry = ty;
+    
+    // Rotate
+    if (rotation == 1) { rx = -ty; ry = tx; }      // 90°
+    else if (rotation == 2) { rx = -tx; ry = -ty; } // 180°
+    else if (rotation == 3) { rx = ty; ry = -tx; }  // 270°
+    
+    // Translate back and add offset
+    return int2(startX + cx + rx, startY + cy + ry);
 }

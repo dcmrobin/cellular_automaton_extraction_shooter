@@ -20,6 +20,8 @@ public class PlayerController : MonoBehaviour
     public event Action OnPlayerDied;
     public Vector2Int Origin => origin;
     public bool IsDead => isDead;
+    public Vector2Int[] Offsets => offsets;
+    public bool[] OffsetAlive => offsetAlive;
     public float HealthFraction
     {
         get
@@ -63,17 +65,23 @@ public class PlayerController : MonoBehaviour
     private bool drawnOnce;
     private bool collisionCheckInProgress = false;
 
-    public Vector2Int[] Offsets => offsets;
-    public bool[] OffsetAlive => offsetAlive;
-
     void Start()
     {
-        kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
-        kernelPlayerDraw = caController.GetKernelIndex("PlayerDraw");
-
-        if (kernelPlayerClear < 0 || kernelPlayerDraw < 0)
+        // Use the safe method to get kernel indices
+        if (caController != null)
         {
-            Debug.LogError("CA-REAPER: Player kernels not found!");
+            kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
+            kernelPlayerDraw = caController.GetKernelIndex("PlayerDraw");
+            
+            if (kernelPlayerClear < 0 || kernelPlayerDraw < 0)
+            {
+                Debug.LogError($"CA-REAPER: Player kernels not found! Clear: {kernelPlayerClear}, Draw: {kernelPlayerDraw}");
+                return;
+            }
+        }
+        else
+        {
+            Debug.LogError("CA-REAPER: CAController is null in PlayerController!");
             return;
         }
 
@@ -82,11 +90,38 @@ public class PlayerController : MonoBehaviour
         BuildOffsetsBuffer();
     }
 
+    public bool IsCellOccupied(Vector2Int worldPos)
+    {
+        if (isDead) return false;
+        for (int i = 0; i < offsetCount; i++)
+            if (offsetAlive[i] && origin + offsets[i] == worldPos)
+                return true;
+        return false;
+    }
+
     void Dispatch(int kernel, int bufferIndex)
     {
-        if (kernel < 0) return;
-        int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
-        caController.cellularAutomaton.Dispatch(kernel, groups, 1, 1);
+        if (kernel < 0)
+        {
+            Debug.LogWarning($"CA-REAPER: Player kernel invalid (index: {kernel}), skipping dispatch");
+            return;
+        }
+        
+        if (caController == null || caController.cellularAutomaton == null)
+        {
+            Debug.LogWarning("CA-REAPER: CAController or ComputeShader is null");
+            return;
+        }
+        
+        try
+        {
+            int groups = Mathf.Max(1, Mathf.CeilToInt(offsetCount / 64f));
+            caController.cellularAutomaton.Dispatch(kernel, groups, 1, 1);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error dispatching Player kernel {kernel}: {e.Message}");
+        }
     }
 
     void OnEnable()
@@ -257,22 +292,56 @@ public class PlayerController : MonoBehaviour
     void DrawPlayer()
     {
         RenderTexture world = caController.CurrentTexture;
-        if (world == null) return;
+        if (world == null)
+        {
+            Debug.LogWarning("CA-REAPER: World texture is null in DrawPlayer");
+            return;
+        }
 
         var shader = caController.cellularAutomaton;
+        if (shader == null)
+        {
+            Debug.LogWarning("CA-REAPER: ComputeShader is null in DrawPlayer");
+            return;
+        }
+
+        if (kernelPlayerDraw < 0)
+        {
+            kernelPlayerDraw = caController.GetKernelIndex("PlayerDraw");
+            if (kernelPlayerDraw < 0)
+            {
+                Debug.LogError("CA-REAPER: PlayerDraw kernel not found!");
+                return;
+            }
+        }
+
         int bufferIdx = GetCurrentBufferIndex();
         
-        shader.SetTexture(kernelPlayerDraw, "World", world);
-        shader.SetBuffer(kernelPlayerDraw, "PlayerOffsets", offsetsBuffers[bufferIdx]);
-        shader.SetBuffer(kernelPlayerDraw, "PlayerAlive", aliveBuffers[bufferIdx]);
-        shader.SetInt("PlayerOffsetCount", offsetCount);
-        shader.SetInts("PlayerOrigin", origin.x, origin.y);
-        shader.SetVector("PlayerColor", playerColor);
-        shader.SetVector("VitalColor", vitalColor);
-        shader.SetInt("VitalOffsetIndex", vitalOffsetIndex);
-        shader.SetInt("PlayerRedistributeEnabled", 0);
-        shader.SetFloat("PlayerRedistributeFactor", 0f);
-        Dispatch(kernelPlayerDraw, bufferIdx);
+        try
+        {
+            // Set all required textures and buffers
+            shader.SetTexture(kernelPlayerDraw, "World", world);
+            shader.SetBuffer(kernelPlayerDraw, "PlayerOffsets", offsetsBuffers[bufferIdx]);
+            shader.SetBuffer(kernelPlayerDraw, "PlayerAlive", aliveBuffers[bufferIdx]);
+            
+            // Set all required parameters
+            shader.SetInt("PlayerOffsetCount", offsetCount);
+            shader.SetInts("PlayerOrigin", origin.x, origin.y);
+            shader.SetVector("PlayerColor", playerColor);
+            shader.SetVector("VitalColor", vitalColor);
+            shader.SetInt("VitalOffsetIndex", vitalOffsetIndex);
+            shader.SetInt("PlayerRedistributeEnabled", 0);
+            shader.SetFloat("PlayerRedistributeFactor", 0f);
+            shader.SetInt("Width", caController.width);
+            shader.SetInt("Height", caController.height);
+            shader.SetInt("Decay", caController.Decay);
+            
+            Dispatch(kernelPlayerDraw, bufferIdx);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error in DrawPlayer: {e.Message}");
+        }
     }
 
     void ClearPlayer(Vector2Int atOrigin)
@@ -281,15 +350,34 @@ public class PlayerController : MonoBehaviour
         if (world == null) return;
 
         var shader = caController.cellularAutomaton;
+        if (shader == null || kernelPlayerClear < 0) return;
+
+        if (kernelPlayerClear < 0)
+        {
+            kernelPlayerClear = caController.GetKernelIndex("PlayerClear");
+            if (kernelPlayerClear < 0) return;
+        }
+
         int bufferIdx = GetCurrentBufferIndex();
         
-        shader.SetTexture(kernelPlayerClear, "World", world);
-        shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffers[bufferIdx]);
-        shader.SetInt("PlayerOffsetCount", offsetCount);
-        shader.SetInts("PlayerPrevOrigin", atOrigin.x, atOrigin.y);
-        shader.SetInt("PlayerRedistributeEnabled", 0);
-        shader.SetFloat("PlayerRedistributeFactor", 0f);
-        Dispatch(kernelPlayerClear, bufferIdx);
+        try
+        {
+            shader.SetTexture(kernelPlayerClear, "World", world);
+            shader.SetBuffer(kernelPlayerClear, "PlayerOffsets", offsetsBuffers[bufferIdx]);
+            shader.SetInt("PlayerOffsetCount", offsetCount);
+            shader.SetInts("PlayerPrevOrigin", atOrigin.x, atOrigin.y);
+            shader.SetInt("PlayerRedistributeEnabled", 0);
+            shader.SetFloat("PlayerRedistributeFactor", 0f);
+            shader.SetInt("Width", caController.width);
+            shader.SetInt("Height", caController.height);
+            shader.SetInt("Decay", caController.Decay);
+            
+            Dispatch(kernelPlayerClear, bufferIdx);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error in ClearPlayer: {e.Message}");
+        }
     }
 
     void BuildOffsetsBuffer()

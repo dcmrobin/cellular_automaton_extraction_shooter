@@ -43,6 +43,10 @@ public class CAController : MonoBehaviour
     private int kernelPlayerDraw = -1;
     private int kernelGunImpact = -1;
     private int kernelGunStep = -1;
+    private int kernelScanForGuns = -1;
+    private int kernelClearGunCells = -1;
+    private int kernelClearPositions = -1;
+    private Dictionary<string, int> kernelCache = new Dictionary<string, int>();
 
     private float timer;
 
@@ -52,20 +56,89 @@ public class CAController : MonoBehaviour
 
     void Awake()
     {
-        kernelInit = FindKernelSafely("Init");
-        kernelStep = FindKernelSafely("Step");
-        kernelPlayerClear = FindKernelSafely("PlayerClear");
-        kernelPlayerDraw = FindKernelSafely("PlayerDraw");
-        kernelGunImpact = FindKernelSafely("GunImpact");
-        kernelGunStep = FindKernelSafely("GunStep");
+        // Initialize kernel cache
+        kernelCache.Clear();
+        
+        // Find all kernels and cache them
+        CacheKernel("Init");
+        CacheKernel("Step");
+        CacheKernel("PlayerClear");
+        CacheKernel("PlayerDraw");
+        CacheKernel("GunImpact");
+        CacheKernel("GunStep");
+        CacheKernel("EnemyDraw");
+        CacheKernel("EnemyClear");
+        CacheKernel("EnemyImpact");
+        CacheKernel("ScanForGuns");
+        CacheKernel("ClearGunCells");
+        CacheKernel("ClearPositions");
+        
+        // Get cached kernel indices
+        kernelInit = GetKernelIndex("Init");
+        kernelStep = GetKernelIndex("Step");
+        kernelPlayerClear = GetKernelIndex("PlayerClear");
+        kernelPlayerDraw = GetKernelIndex("PlayerDraw");
+        kernelGunImpact = GetKernelIndex("GunImpact");
+        kernelGunStep = GetKernelIndex("GunStep");
 
         current = CreateRenderTexture();
         next = CreateRenderTexture();
-        tempOutput = CreateRenderTexture(); // Create persistent temp texture
+        tempOutput = CreateRenderTexture();
 
         SetupComputeShader();
         Initialize();
         ApplyTextureToPlane();
+    }
+
+    void Start()
+    {
+        DebugKernels();
+    }
+
+    public void DebugKernels()
+    {
+        if (cellularAutomaton == null)
+        {
+            Debug.LogError("CA-REAPER: ComputeShader is null!");
+            return;
+        }
+
+        string[] kernelNames = new string[] 
+        { 
+            "Init", "Step", "PlayerClear", "PlayerDraw", 
+            "GunImpact", "GunStep", "EnemyDraw", "EnemyClear", 
+            "EnemyImpact", "ScanForGuns", "ClearGunCells", "ClearPositions" 
+        };
+
+        Debug.Log("=== CA-REAPER Kernel Debug ===");
+        foreach (string name in kernelNames)
+        {
+            bool hasKernel = cellularAutomaton.HasKernel(name);
+            int index = hasKernel ? cellularAutomaton.FindKernel(name) : -1;
+            Debug.Log($"Kernel '{name}': {(hasKernel ? $"FOUND at index {index}" : "NOT FOUND")}");
+        }
+        Debug.Log("===============================");
+    }
+
+    void CacheKernel(string kernelName)
+    {
+        if (cellularAutomaton == null)
+        {
+            Debug.LogError($"CA-REAPER: ComputeShader is null when caching {kernelName}");
+            return;
+        }
+        
+        if (cellularAutomaton.HasKernel(kernelName))
+        {
+            int index = cellularAutomaton.FindKernel(kernelName);
+            kernelCache[kernelName] = index;
+            Debug.Log($"CA-REAPER: Cached kernel '{kernelName}' at index {index}");
+        }
+        else
+        {
+            kernelCache[kernelName] = -1;
+            Debug.LogWarning($"CA-REAPER: Kernel '{kernelName}' not found in compute shader");
+        }
     }
 
     int FindKernelSafely(string kernelName)
@@ -130,6 +203,21 @@ public class CAController : MonoBehaviour
         cellularAutomaton.SetVector("AutomatonID", new Vector4(automatonID.x, automatonID.y, automatonID.z, 1));
         cellularAutomaton.SetInt("DecayCountUp", decayCountUp ? 1 : 0);
         SetRules();
+        
+        // CRITICAL: Set the World texture reference for all kernels that need it
+        // We need to set it for each kernel that uses World
+        int[] kernelsWithWorld = new int[] { 
+            kernelPlayerClear, kernelPlayerDraw, 
+            kernelScanForGuns, kernelClearGunCells, kernelClearPositions 
+        };
+        
+        foreach (int kernel in kernelsWithWorld)
+        {
+            if (kernel >= 0)
+            {
+                cellularAutomaton.SetTexture(kernel, "World", current);
+            }
+        }
     }
 
     void Initialize()
@@ -162,35 +250,82 @@ public class CAController : MonoBehaviour
             return;
         }
 
-        cellularAutomaton.SetTexture(kernelStep, "Current", current);
-        cellularAutomaton.SetTexture(kernelStep, "Result", next);
-        DispatchKernel(kernelStep, "Step");
+        try
+        {
+            // Set all required textures and parameters before dispatching
+            cellularAutomaton.SetTexture(kernelStep, "Current", current);
+            cellularAutomaton.SetTexture(kernelStep, "Result", next);
+            
+            // CRITICAL: Keep World texture updated
+            // Set World for all kernels that use it
+            int[] kernelsWithWorld = new int[] { 
+                kernelPlayerClear, kernelPlayerDraw, 
+                kernelScanForGuns, kernelClearGunCells, kernelClearPositions 
+            };
+            
+            foreach (int kernel in kernelsWithWorld)
+            {
+                if (kernel >= 0)
+                {
+                    cellularAutomaton.SetTexture(kernel, "World", current);
+                }
+            }
+            
+            // Set all required parameters
+            cellularAutomaton.SetInt("Width", width);
+            cellularAutomaton.SetInt("Height", height);
+            cellularAutomaton.SetInt("Decay", Decay);
+            cellularAutomaton.SetInt("DecayCountUp", decayCountUp ? 1 : 0);
+            cellularAutomaton.SetVector("AutomatonID", new Vector4(automatonID.x, automatonID.y, automatonID.z, 1));
+            
+            // Dispatch
+            DispatchKernel(kernelStep, "Step");
 
-        RenderTexture temp = current;
-        current = next;
-        next = temp;
+            // Swap textures
+            RenderTexture temp = current;
+            current = next;
+            next = temp;
 
-        targetRenderer.material.mainTexture = current;
-        OnCAStepped?.Invoke();
+            targetRenderer.material.mainTexture = current;
+            OnCAStepped?.Invoke();
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error in Step: {e.Message}");
+        }
     }
 
     void DispatchKernel(int kernelIndex, string kernelName)
     {
         if (kernelIndex < 0)
         {
-            Debug.LogError($"CA-REAPER: Cannot dispatch {kernelName} - invalid kernel index");
+            Debug.LogWarning($"CA-REAPER: Cannot dispatch {kernelName} - invalid kernel index (value: {kernelIndex})");
             return;
         }
-        int groupsX = Mathf.CeilToInt(width / 8f);
-        int groupsY = Mathf.CeilToInt(height / 8f);
-        cellularAutomaton.Dispatch(kernelIndex, groupsX, groupsY, 1);
+        
+        if (cellularAutomaton == null)
+        {
+            Debug.LogError($"CA-REAPER: ComputeShader is null for {kernelName}");
+            return;
+        }
+        
+        try
+        {
+            int groupsX = Mathf.CeilToInt(width / 8f);
+            int groupsY = Mathf.CeilToInt(height / 8f);
+            cellularAutomaton.Dispatch(kernelIndex, groupsX, groupsY, 1);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error dispatching {kernelName} (index {kernelIndex}): {e.Message}");
+        }
     }
 
     public void ModifyTextureDirect(int kernel, int groupsX, int groupsY)
     {
         if (kernel < 0)
         {
-            Debug.LogError("CA-REAPER: Cannot modify texture - invalid kernel");
+            Debug.LogWarning($"CA-REAPER: Cannot modify texture - invalid kernel index: {kernel}");
             return;
         }
         if (current == null)
@@ -198,34 +333,36 @@ public class CAController : MonoBehaviour
             Debug.LogError("CA-REAPER: Current texture is null!");
             return;
         }
+        if (cellularAutomaton == null)
+        {
+            Debug.LogError("CA-REAPER: ComputeShader is null!");
+            return;
+        }
 
-        // Use persistent tempOutput instead of creating new temporary texture
-        cellularAutomaton.SetTexture(kernel, "Current", current);
-        cellularAutomaton.SetTexture(kernel, "Result", tempOutput);
-        cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
+        try
+        {
+            cellularAutomaton.SetTexture(kernel, "Current", current);
+            cellularAutomaton.SetTexture(kernel, "Result", tempOutput);
+            cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
 
-        // Swap current and tempOutput so the result becomes the new current
-        RenderTexture swap = current;
-        current = tempOutput;
-        tempOutput = swap;
+            RenderTexture swap = current;
+            current = tempOutput;
+            tempOutput = swap;
 
-        targetRenderer.material.mainTexture = current;
+            targetRenderer.material.mainTexture = current;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error in ModifyTextureDirect: {e.Message}");
+        }
     }
 
     public int GetKernelIndex(string kernelName)
     {
-        switch (kernelName)
-        {
-            case "Init": return kernelInit;
-            case "Step": return kernelStep;
-            case "PlayerClear": return kernelPlayerClear;
-            case "PlayerDraw": return kernelPlayerDraw;
-            case "GunImpact": return kernelGunImpact;
-            case "GunStep": return kernelGunStep;
-            default:
-                Debug.LogError($"CA-REAPER: Unknown kernel name '{kernelName}'");
-                return -1;
-        }
+        if (kernelCache.TryGetValue(kernelName, out int index))
+            return index;
+        else
+            return -1;
     }
 
     public void RequestColorData(Action<Color[]> callback)

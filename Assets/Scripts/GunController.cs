@@ -8,6 +8,7 @@ public class GunController : MonoBehaviour
     public CAController caController;
     public EnemyManager enemyManager;
     public Transform muzzle;
+    public SpriteRenderer body;
     public string rules = "";
     public Vector3 automatonID = new Vector3(1f, 0f, 0f);
     public event Action<Vector2Int, int> OnShotFired;
@@ -338,5 +339,46 @@ public class GunController : MonoBehaviour
         shader.SetInt("CurrentGunSurvivalMask", survivalMask);
         shader.SetInt("CurrentGunDecay", Decay);
         shader.SetVector("CurrentGunAutomatonID", automatonID);
+    }
+
+    public void SetGunData(GunData data)
+    {
+        this.rules = data.rules;
+        this.automatonID = data.automatonID;
+        this.fireRate = data.fireRate;
+        this.spread = data.spread;
+        this.AOE = data.AOE;
+        this.Decay = data.decay;
+
+        SetComputeShaderForGun();
+        
+        // Update visual feedback
+        if (shotLine != null)
+        {
+            shotLineColor = new Color(automatonID.x, automatonID.y, automatonID.z);
+            shotLine.startColor = shotLineColor;
+            shotLine.endColor = shotLineColor;
+        }
+    }
+
+    public void SetMuzzlePosition(Vector2Int gridPos, CAController ca)
+    {
+        // Convert grid position to world position
+        Bounds b = ca.targetRenderer.bounds;
+        float u = (gridPos.x + 0.5f) / ca.width;
+        float v = (gridPos.y + 0.5f) / ca.height;
+        Vector3 worldPos = new Vector3(
+            Mathf.Lerp(b.min.x, b.max.x, u),
+            Mathf.Lerp(b.min.y, b.max.y, v),
+            0
+        );
+        
+        // Update muzzle transform
+        if (muzzle != null)
+        {
+            muzzle.position = worldPos;
+            // Optionally rotate the muzzle to face the direction of the barrel
+            // We can calculate this from the gun shape
+        }
     }
 }

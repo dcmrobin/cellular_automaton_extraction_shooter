@@ -31,7 +31,7 @@ public class EnemyUnit
     private int mapHeight;
 
     // Called by EnemyManager
-    public void Initialize(ComputeShader shader, int radius, Vector2Int startOrigin, Color color, Color vitalColor, int width, int height)
+    public void Initialize(ComputeShader shader, int radius, Vector2Int startOrigin, Color color, Color vitalColor, int width, int height, float interval)
     {
         Radius = radius;
         Origin = startOrigin;
@@ -41,6 +41,7 @@ public class EnemyUnit
         IsDead = false;
         mapHeight = height;
         mapWidth = width;
+        moveInterval = interval;
 
         BuildOffsets();
         CreateBuffers();
@@ -172,19 +173,25 @@ public class EnemyUnit
         if (moveTimer < moveInterval) return;
         moveTimer = 0f;
 
-        Vector2Int dir = Vector2Int.zero;
+        // Calculate direction
         Vector2Int diff = target - Origin;
+        Vector2Int dir = Vector2Int.zero;
+        
+        // Move in the direction with larger distance
         if (Mathf.Abs(diff.x) > Mathf.Abs(diff.y))
             dir.x = diff.x > 0 ? 1 : -1;
-        else
+        else if (Mathf.Abs(diff.y) > 0)
             dir.y = diff.y > 0 ? 1 : -1;
-
-        // Optional: check bounds (assuming no solid collision)
+        else
+            return; // Already at target
+        
+        // Don't move if it would go out of bounds
         Vector2Int newOrigin = Origin + dir;
-        // Simple bounds check for all cells? We'll just check origin within a margin.
-        if (newOrigin.x < 0 || newOrigin.x >= mapWidth || newOrigin.y < 0 || newOrigin.y >= mapHeight) return; // hardcoded? Better pass world size.
-        // For simplicity, assume bounds are handled by EnemyManager.
-
+        if (newOrigin.x < 0 || newOrigin.x >= mapWidth || 
+            newOrigin.y < 0 || newOrigin.y >= mapHeight) return;
+        
+        // Check if new position is occupied by another enemy (optional)
+        // For now, just move
         prevOrigin = Origin;
         Origin = newOrigin;
     }

@@ -355,7 +355,7 @@ MonoBehaviour:
   enemyColor: {r: 0, g: 0.7038727, b: 1, a: 1}
   enemyVitalColor: {r: 0.9719956, g: 1, b: 0, a: 1}
   detectionRange: 70
-  moveInterval: 0.4
+  moveInterval: 0.07
   maxEnemies: 20
   spawnInterval: 5
   densityThreshold: 0.6
@@ -473,7 +473,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   caController: {fileID: 775166573}
-  radius: 3
+  radius: 2
   playerColor: {r: 0, g: 0.8679245, b: 0.025527216, a: 1}
   vitalColor: {r: 1, g: 1, b: 0.2, a: 1}
   moveRate: 30
@@ -583,6 +583,131 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1671443599
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1671443601}
+  - component: {fileID: 1671443600}
+  m_Layer: 0
+  m_Name: Gun Pickup Manager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1671443600
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1671443599}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1c5b30d08072f4842a9cdfebbd465e8b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  caController: {fileID: 775166573}
+  gunController: {fileID: 1759475164}
+  playerController: {fileID: 819505588}
+  enemyManager: {fileID: 737852859}
+  gunPickupPrefab: {fileID: 2398867272060062185, guid: dedba451d1c0cc648be1c0f056628817, type: 3}
+  templateTexture: {fileID: 2800000, guid: 7435e33c1259184449dfba06da3552d1, type: 3}
+  scanInterval: 5
+  matchThreshold: 0.8
+  scanStride: 2
+  fireRateCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 29
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 30
+      inSlope: 29
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  spreadCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 50
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 50
+      inSlope: 50
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  AOECurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 19
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 20
+      inSlope: 19
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+--- !u!4 &1671443601
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1671443599}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0.1397862, y: 0.76367104, z: 12587.678}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1672746127
 GameObject:
   m_ObjectHideFlags: 0
@@ -663,6 +788,7 @@ MonoBehaviour:
   caController: {fileID: 775166573}
   enemyManager: {fileID: 737852859}
   muzzle: {fileID: 1672746128}
+  body: {fileID: 654511893}
   rules: 
   automatonID: {x: 1, y: 0, z: 0}
   fireRate: 1
@@ -777,3 +903,4 @@ SceneRoots:
   - {fileID: 775166574}
   - {fileID: 1230022240}
   - {fileID: 737852860}
+  - {fileID: 1671443601}

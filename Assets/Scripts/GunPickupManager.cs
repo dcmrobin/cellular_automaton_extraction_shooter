@@ -1,0 +1,715 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Rendering;
+using System.Linq;
+
+public class GunPickupManager : MonoBehaviour
+{
+    [Header("References")]
+    public CAController caController;
+    public GunController gunController;
+    public PlayerController playerController;
+    public EnemyManager enemyManager;
+    public GameObject gunPickupPrefab;
+
+    [Header("Detection")]
+    public Texture2D templateTexture;
+    public float scanInterval = 3f;
+    [Range(0.5f, 1f)]
+    public float matchThreshold = 0.7f;
+    public int scanStride = 2;
+
+    [Header("Stats Derivation")]
+    public AnimationCurve fireRateCurve = AnimationCurve.Linear(0, 1, 1, 30);
+    public AnimationCurve spreadCurve = AnimationCurve.Linear(0, 0, 1, 50);
+    public AnimationCurve AOECurve = AnimationCurve.Linear(0, 1, 1, 20);
+
+    // GPU resources
+    private int kernelScanForGuns = -1;
+    private int kernelClearGunCells = -1;
+    
+    private int templateWidth, templateHeight;
+    private float scanTimer = 0f;
+    private List<GunPickup> activePickups = new List<GunPickup>();
+
+    // GPU data structures
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MatchResult
+    {
+        public Vector2Int center;
+        public int cellCount;
+        public int minX;
+        public int maxX;
+        public int minY;
+        public int maxY;
+    }
+
+    private ComputeBuffer matchResultsBuffer;
+    private ComputeBuffer matchCountBuffer;
+    private int[] matchCountData = new int[1];
+    private MatchResult[] matchResultsData;
+    private const int MAX_MATCHES = 256;
+
+    void Start()
+    {
+        if (caController == null) caController = FindObjectOfType<CAController>();
+        if (gunController == null) gunController = FindObjectOfType<GunController>();
+        if (playerController == null) playerController = FindObjectOfType<PlayerController>();
+        if (enemyManager == null) enemyManager = FindObjectOfType<EnemyManager>();
+
+        if (templateTexture == null)
+        {
+            Debug.LogError("GunPickupManager: No template texture assigned!");
+            enabled = false;
+            return;
+        }
+
+        // Get template dimensions
+        templateWidth = templateTexture.width;
+        templateHeight = templateTexture.height;
+
+        // Find kernels using the safe method
+        if (caController != null)
+        {
+            kernelScanForGuns = caController.GetKernelIndex("ScanForGuns");
+            kernelClearGunCells = caController.GetKernelIndex("ClearGunCells");
+            
+            Debug.Log($"GunPickupManager: ScanForGuns kernel index: {kernelScanForGuns}");
+            Debug.Log($"GunPickupManager: ClearGunCells kernel index: {kernelClearGunCells}");
+        }
+
+        // Initialize GPU buffers
+        InitializeGPUBuffers();
+
+        // Upload template to GPU
+        UploadTemplateToGPU();
+    }
+
+    void OnDestroy()
+    {
+        // Release GPU buffers
+        matchResultsBuffer?.Release();
+        matchCountBuffer?.Release();
+    }
+
+    void InitializeGPUBuffers()
+    {
+        matchResultsBuffer = new ComputeBuffer(MAX_MATCHES, System.Runtime.InteropServices.Marshal.SizeOf(typeof(MatchResult)));
+        matchResultsData = new MatchResult[MAX_MATCHES];
+        
+        matchCountBuffer = new ComputeBuffer(1, sizeof(int));
+        matchCountData[0] = 0;
+        matchCountBuffer.SetData(matchCountData);
+    }
+
+    void UploadTemplateToGPU()
+    {
+        ComputeShader shader = caController.cellularAutomaton;
+        if (shader == null || kernelScanForGuns < 0) return;
+
+        // Upload template as a texture (already available)
+        shader.SetTexture(kernelScanForGuns, "TemplateTexture", templateTexture);
+        
+        // Set template dimensions
+        shader.SetInt("TemplateWidth", templateWidth);
+        shader.SetInt("TemplateHeight", templateHeight);
+        shader.SetInt("ScanStride", scanStride);
+        shader.SetFloat("MatchThreshold", matchThreshold);
+        
+        // Set output buffers
+        shader.SetBuffer(kernelScanForGuns, "MatchResults", matchResultsBuffer);
+        shader.SetBuffer(kernelScanForGuns, "MatchCount", matchCountBuffer);
+        
+        // Also set for clear kernel
+        if (kernelClearGunCells >= 0)
+        {
+            shader.SetBuffer(kernelClearGunCells, "MatchResults", matchResultsBuffer);
+            shader.SetBuffer(kernelClearGunCells, "MatchCount", matchCountBuffer);
+        }
+    }
+
+    void Update()
+    {
+        scanTimer += Time.deltaTime;
+        if (scanTimer >= scanInterval)
+        {
+            scanTimer = 0f;
+            ScanForGunsGPU();
+        }
+    }
+
+    List<MatchResult> DeduplicateMatches(MatchResult[] matches, int count)
+    {
+        var sorted = new List<MatchResult>();
+        for (int i = 0; i < count && i < MAX_MATCHES; i++)
+            sorted.Add(matches[i]);
+        // Prefer the most complete match when several overlap
+        sorted.Sort((a, b) => b.cellCount.CompareTo(a.cellCount));
+
+        var accepted = new List<MatchResult>();
+        foreach (var candidate in sorted)
+        {
+            bool isDuplicate = false;
+            foreach (var kept in accepted)
+            {
+                if (BoundingBoxesOverlapSignificantly(candidate, kept))
+                {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate)
+                accepted.Add(candidate);
+        }
+        return accepted;
+    }
+
+    bool BoundingBoxesOverlapSignificantly(MatchResult a, MatchResult b)
+    {
+        int overlapMinX = Mathf.Max(a.minX, b.minX);
+        int overlapMaxX = Mathf.Min(a.maxX, b.maxX);
+        int overlapMinY = Mathf.Max(a.minY, b.minY);
+        int overlapMaxY = Mathf.Min(a.maxY, b.maxY);
+
+        if (overlapMaxX <= overlapMinX || overlapMaxY <= overlapMinY)
+            return false;
+
+        int overlapArea = (overlapMaxX - overlapMinX) * (overlapMaxY - overlapMinY);
+        int areaA = Mathf.Max(1, (a.maxX - a.minX) * (a.maxY - a.minY));
+        int areaB = Mathf.Max(1, (b.maxX - b.minX) * (b.maxY - b.minY));
+        int smallerArea = Mathf.Min(areaA, areaB);
+
+        return overlapArea >= smallerArea * 0.4f;
+    }
+
+    void ScanForGunsGPU()
+    {
+        if (caController == null || caController.cellularAutomaton == null)
+            return;
+        
+        if (kernelScanForGuns < 0)
+        {
+            Debug.LogWarning("GunPickupManager: ScanForGuns kernel not available!");
+            return;
+        }
+
+        ComputeShader shader = caController.cellularAutomaton;
+        
+        try
+        {
+            // Reset match count
+            matchCountData[0] = 0;
+            matchCountBuffer.SetData(matchCountData);
+            
+            // Set all required textures and parameters
+            shader.SetTexture(kernelScanForGuns, "World", caController.CurrentTexture);
+            shader.SetTexture(kernelScanForGuns, "TemplateTexture", templateTexture);
+            
+            // Set CA dimensions
+            shader.SetInt("Width", caController.width);
+            shader.SetInt("Height", caController.height);
+            shader.SetInt("Decay", caController.Decay);
+            
+            // Set template dimensions
+            shader.SetInt("TemplateWidth", templateWidth);
+            shader.SetInt("TemplateHeight", templateHeight);
+            shader.SetInt("ScanStride", scanStride);
+            shader.SetFloat("MatchThreshold", matchThreshold);
+            
+            // Set output buffers
+            shader.SetBuffer(kernelScanForGuns, "MatchResults", matchResultsBuffer);
+            shader.SetBuffer(kernelScanForGuns, "MatchCount", matchCountBuffer);
+            
+            // Dispatch the scan kernel
+            int groupsX = Mathf.CeilToInt((caController.width - templateWidth) / (float)(scanStride * 8));
+            int groupsY = Mathf.CeilToInt((caController.height - templateHeight) / (float)(scanStride * 8));
+            groupsX = Mathf.Max(1, groupsX);
+            groupsY = Mathf.Max(1, groupsY);
+            
+            shader.Dispatch(kernelScanForGuns, groupsX, groupsY, 1);
+            
+            // Read back match count
+            matchCountBuffer.GetData(matchCountData);
+            int matchCount = matchCountData[0];
+            
+            if (matchCount == 0) return;
+            
+            matchResultsBuffer.GetData(matchResultsData, 0, 0, Math.Min(matchCount, MAX_MATCHES));
+
+            var dedupedMatches = DeduplicateMatches(matchResultsData, matchCount);
+
+            foreach (MatchResult match in dedupedMatches)
+            {
+                if (match.cellCount < 5) continue;
+
+                // Check for overlap with player
+                bool overlapsPlayer = false;
+                if (playerController != null && !playerController.IsDead)
+                {
+                    for (int y = match.minY; y <= match.maxY && !overlapsPlayer; y++)
+                    {
+                        for (int x = match.minX; x <= match.maxX && !overlapsPlayer; x++)
+                        {
+                            Vector2Int pos = new Vector2Int(x, y);
+                            if (playerController.IsCellOccupied(pos))
+                                overlapsPlayer = true;
+                        }
+                    }
+                }
+
+                if (overlapsPlayer) continue;
+
+                bool overlapsEnemy = false;
+                if (enemyManager != null)
+                {
+                    for (int y = match.minY; y <= match.maxY && !overlapsEnemy; y++)
+                    {
+                        for (int x = match.minX; x <= match.maxX && !overlapsEnemy; x++)
+                        {
+                            Vector2Int pos = new Vector2Int(x, y);
+                            if (enemyManager.IsCellOccupiedByEnemy(pos))
+                                overlapsEnemy = true;
+                        }
+                    }
+                }
+
+                if (overlapsEnemy) continue;
+
+                ClearCellsFromCA(match);
+                CreatePickupFromMatch(match);
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"GunPickupManager: Error in ScanForGunsGPU: {e.Message}");
+        }
+    }
+
+    void ClearCellsFromCA(MatchResult match)
+    {
+        if (kernelClearGunCells >= 0 && caController.cellularAutomaton != null)
+        {
+            try
+            {
+                ComputeShader shader = caController.cellularAutomaton;
+                
+                // Reset match count
+                matchCountData[0] = 1; // Only clear this one match
+                matchCountBuffer.SetData(matchCountData);
+                
+                // Set match results
+                MatchResult[] singleMatch = new MatchResult[] { match };
+                matchResultsBuffer.SetData(singleMatch);
+                
+                // Set parameters
+                shader.SetTexture(kernelClearGunCells, "World", caController.CurrentTexture);
+                shader.SetBuffer(kernelClearGunCells, "MatchResults", matchResultsBuffer);
+                shader.SetBuffer(kernelClearGunCells, "MatchCount", matchCountBuffer);
+                shader.SetInt("Width", caController.width);
+                shader.SetInt("Height", caController.height);
+                shader.SetInt("Decay", caController.Decay);
+                
+                // Dispatch
+                int groups = Mathf.CeilToInt(1 / 64f);
+                shader.Dispatch(kernelClearGunCells, Mathf.Max(1, groups), 1, 1);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Error clearing cells with GPU: {e.Message}");
+            }
+        }
+        else
+        {
+            // Fallback to CPU method
+            ClearCellsCPU(match);
+        }
+    }
+
+    void ClearCellsCPU(MatchResult match)
+    {
+        // Use the latest snapshot to clear cells
+        caController.RequestColorData(data =>
+        {
+            if (data == null) return;
+            
+            int width = caController.width;
+            int height = caController.height;
+            
+            // Clear cells in the bounding box
+            int startY = Math.Max(0, match.minY);
+            int endY = Math.Min(height - 1, match.maxY);
+            int startX = Math.Max(0, match.minX);
+            int endX = Math.Min(width - 1, match.maxX);
+            
+            for (int y = startY; y <= endY; y++)
+            {
+                for (int x = startX; x <= endX; x++)
+                {
+                    int index = y * width + x;
+                    Color cell = data[index];
+                    
+                    // Check if it's part of the gun
+                    if (caController.IsSolid(cell) || caController.IsGunCA(cell))
+                    {
+                        // Check if it's connected to the center (approximate)
+                        Vector2Int pos = new Vector2Int(x, y);
+                        float dist = Vector2Int.Distance(pos, new Vector2Int(match.center.x, match.center.y));
+                        if (dist < Math.Max(templateWidth, templateHeight) * 2f)
+                        {
+                            // Clear it
+                            float deadState = (caController.Decay > 1) ? (float)caController.Decay : 0f;
+                            data[index] = new Color(0, 0, 0, deadState);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    void CreatePickupFromMatch(MatchResult match)
+    {
+        // Extract cells from the match data
+        HashSet<Vector2Int> cells = ExtractCellsFromMatch(match);
+        if (cells.Count < 5) return;
+        if (!VerifyShapeMatchesTemplate(cells, new Vector2Int(match.center.x, match.center.y)))
+            return;
+        
+        // Derive stats
+        GunData data = DeriveGunStats(cells);
+        
+        // Create sprite
+        Sprite sprite = CreateSpriteFromCells(cells, data);
+        
+        // Instantiate pickup
+        GameObject pickupObj = Instantiate(gunPickupPrefab);
+        GunPickup pickup = pickupObj.GetComponent<GunPickup>();
+        if (pickup != null)
+        {
+            pickup.Initialize(data, sprite, new Vector2Int(match.center.x, match.center.y), caController, cells);
+            activePickups.Add(pickup);
+        }
+    }
+
+    HashSet<Vector2Int> ExtractCellsFromMatch(MatchResult match)
+    {
+        HashSet<Vector2Int> cells = new HashSet<Vector2Int>();
+        
+        // Use the latest snapshot to extract cells
+        if (caController.LatestSnapshot == null) return cells;
+        
+        Color[] snapshot = caController.LatestSnapshot;
+        int width = caController.width;
+        
+        // BFS to extract connected component
+        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+        Vector2Int start = new Vector2Int(match.center.x, match.center.y);
+        queue.Enqueue(start);
+        
+        while (queue.Count > 0)
+        {
+            Vector2Int pos = queue.Dequeue();
+            if (cells.Contains(pos)) continue;
+            
+            // Check bounds
+            if (pos.x < 0 || pos.x >= caController.width || 
+                pos.y < 0 || pos.y >= caController.height) continue;
+            
+            // Check if solid
+            int index = pos.y * width + pos.x;
+            if (!caController.IsSolid(snapshot[index]) && !caController.IsGunCA(snapshot[index])) continue;
+            
+            // Add to set
+            cells.Add(pos);
+            
+            // Check neighbors (4-directional)
+            Vector2Int[] neighbors = new Vector2Int[]
+            {
+                pos + Vector2Int.up,
+                pos + Vector2Int.down,
+                pos + Vector2Int.left,
+                pos + Vector2Int.right
+            };
+            
+            foreach (var neighbor in neighbors)
+            {
+                if (!cells.Contains(neighbor))
+                    queue.Enqueue(neighbor);
+            }
+        }
+        
+        return cells;
+    }
+
+    GunData DeriveGunStats(HashSet<Vector2Int> cells)
+    {
+        int cellCount = cells.Count;
+        
+        // Calculate bounding box
+        int minX = int.MaxValue, maxX = int.MinValue;
+        int minY = int.MaxValue, maxY = int.MinValue;
+        foreach (var p in cells)
+        {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
+        
+        int width = maxX - minX + 1;
+        int height = maxY - minY + 1;
+        float aspect = (float)width / height;
+        float density = cellCount / (float)(width * height);
+        
+        // Derive stats
+        int fireRate = Mathf.RoundToInt(fireRateCurve.Evaluate(Mathf.Clamp01(cellCount / 50f)));
+        int spread = Mathf.RoundToInt(spreadCurve.Evaluate(Mathf.Clamp01(aspect)));
+        int AOE = Mathf.RoundToInt(AOECurve.Evaluate(Mathf.Clamp01(cellCount / 100f)));
+        int decay = Mathf.Max(1, Mathf.RoundToInt(cellCount / 10f));
+        
+        // Generate rules
+        string birthStr = GenerateRuleFromShape(cells);
+        string survivalStr = GenerateRuleFromShape(cells);
+        string rules = $"{birthStr}/{survivalStr}/{decay}";
+        
+        // Gun color (variation of main CA color)
+        Vector3 mainColor = caController.automatonID;
+        Vector3 gunColor = new Vector3(
+            Mathf.Clamp01(mainColor.x + UnityEngine.Random.Range(-0.2f, 0.2f)),
+            Mathf.Clamp01(mainColor.y + UnityEngine.Random.Range(-0.2f, 0.2f)),
+            Mathf.Clamp01(mainColor.z + UnityEngine.Random.Range(-0.2f, 0.2f))
+        );
+        
+        return new GunData(rules, gunColor, fireRate, spread, AOE, decay);
+    }
+
+    string GenerateRuleFromShape(HashSet<Vector2Int> cells)
+    {
+        int count = cells.Count % 9;
+        string digits = "";
+        for (int i = 0; i < Mathf.Min(count + 1, 5); i++)
+            digits += UnityEngine.Random.Range(0, 9).ToString();
+        return digits;
+    }
+
+    bool VerifyShapeMatchesTemplate(HashSet<Vector2Int> cells, Vector2Int center)
+    {
+        // Calculate the bounding box of the cells
+        int minX = int.MaxValue, maxX = int.MinValue;
+        int minY = int.MaxValue, maxY = int.MinValue;
+        foreach (var p in cells)
+        {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
+        
+        int width = maxX - minX + 1;
+        int height = maxY - minY + 1;
+        
+        // Check if size matches template roughly
+        if (width > templateWidth * 3 || height > templateHeight * 3) return false;
+        if (width < templateWidth / 3 || height < templateHeight / 3) return false;
+        
+        // Check cell count ratio
+        float cellDensity = cells.Count / (float)(width * height);
+        if (cellDensity < 0.3f) return false;
+        
+        return true;
+    }
+
+    Sprite CreateSpriteFromCells(HashSet<Vector2Int> cells, GunData data)
+    {
+        // Calculate bounding box
+        int minX = int.MaxValue, maxX = int.MinValue;
+        int minY = int.MaxValue, maxY = int.MinValue;
+        foreach (var p in cells)
+        {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
+        
+        // Add padding for visual effects
+        int padding = 2;
+        int w = maxX - minX + 1 + padding * 2;
+        int h = maxY - minY + 1 + padding * 2;
+        
+        Texture2D tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+        tex.filterMode = FilterMode.Point;
+        tex.wrapMode = TextureWrapMode.Clamp;
+        
+        Color[] colors = new Color[w * h];
+        
+        // Base colors
+        Color baseColor = new Color(data.automatonID.x, data.automatonID.y, data.automatonID.z, 1f);
+        Color darkColor = new Color(data.automatonID.x * 0.3f, data.automatonID.y * 0.3f, data.automatonID.z * 0.3f, 1f);
+        Color lightColor = new Color(
+            Mathf.Clamp01(data.automatonID.x + 0.3f), 
+            Mathf.Clamp01(data.automatonID.y + 0.3f), 
+            Mathf.Clamp01(data.automatonID.z + 0.3f), 
+            1f
+        );
+        Color accentColor = new Color(
+            Mathf.Clamp01(data.automatonID.x + 0.5f), 
+            Mathf.Clamp01(data.automatonID.y + 0.2f), 
+            Mathf.Clamp01(data.automatonID.z + 0.5f), 
+            1f
+        );
+        
+        // Get snapshot for alpha values
+        Color[] snapshot = caController.LatestSnapshot;
+        int width = caController.width;
+        
+        // First pass: determine which cells are part of the gun
+        bool[,] isGunCell = new bool[w, h];
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                Vector2Int pos = new Vector2Int(minX + x - padding, minY + y - padding);
+                isGunCell[x, y] = cells.Contains(pos);
+            }
+        }
+        
+        // Second pass: fill in dead cells (holes) within the gun shape
+        bool[,] filledCells = (bool[,])isGunCell.Clone();
+        
+        // Fill holes: any empty cell surrounded by solid cells on 4 sides becomes filled
+        for (int y = 1; y < h - 1; y++)
+        {
+            for (int x = 1; x < w - 1; x++)
+            {
+                if (!isGunCell[x, y])
+                {
+                    bool surrounded = isGunCell[x-1, y] && isGunCell[x+1, y] && 
+                                    isGunCell[x, y-1] && isGunCell[x, y+1];
+                    if (surrounded)
+                    {
+                        filledCells[x, y] = true;
+                    }
+                }
+            }
+        }
+        
+        // Calculate center for part detection
+        int centerX = w / 2;
+        int centerY = h / 2;
+        
+        // Generate colors for each pixel
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                Vector2Int pos = new Vector2Int(minX + x - padding, minY + y - padding);
+                bool isSolid = filledCells[x, y];
+                
+                if (isSolid)
+                {
+                    // Get alpha from CA state if available
+                    float alpha = 0.85f;
+                    float state = 1f;
+                    
+                    if (snapshot != null && pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < caController.height)
+                    {
+                        int index = pos.y * width + pos.x;
+                        Color cellColor = snapshot[index];
+                        state = cellColor.a;
+                        
+                        if (state > 0.5f && state < 1.5f)
+                            alpha = 0.95f; // Alive
+                        else if (state >= 1.5f && state < caController.Decay)
+                            alpha = 0.7f - (state - 1.5f) / (caController.Decay - 1.5f) * 0.3f; // Decaying
+                        else
+                            alpha = 0.5f; // Dead but filled
+                    }
+                    
+                    // Determine part based on relative position
+                    float relX = (float)(x - centerX) / centerX;
+                    float relY = (float)(y - centerY) / centerY;
+                    
+                    Color partColor = baseColor;
+                    
+                    // Barrel (right side, middle)
+                    if (relX > 0.2f && Mathf.Abs(relY) < 0.3f)
+                        partColor = lightColor;
+                    // Handle (bottom-left)
+                    else if (relX < -0.2f && relY < -0.2f)
+                        partColor = darkColor;
+                    // Grip (bottom)
+                    else if (relY < -0.3f && Mathf.Abs(relX) < 0.3f)
+                        partColor = accentColor;
+                    // Sight (top)
+                    else if (relY > 0.3f && Mathf.Abs(relX) < 0.2f)
+                        partColor = lightColor;
+                    
+                    // Add horizontal lines (futuristic look)
+                    bool isHorizontalLine = false;
+                    int lineSpacing = 3;
+                    for (int lineY = 0; lineY < h; lineY += lineSpacing)
+                    {
+                        if (Mathf.Abs(y - lineY) <= 1 && isGunCell[x, lineY])
+                        {
+                            isHorizontalLine = true;
+                            break;
+                        }
+                    }
+                    
+                    if (isHorizontalLine && !(relX > 0.2f && Mathf.Abs(relY) < 0.3f)) // Don't line the barrel
+                    {
+                        partColor = Color.Lerp(partColor, darkColor, 0.4f);
+                    }
+                    
+                    // Add part separators (dark lines between parts)
+                    bool isSeparator = false;
+                    // Vertical separator between barrel and body
+                    if (Mathf.Abs(x - centerX - 2) <= 1 && relX > 0 && relX < 0.3f && Mathf.Abs(relY) < 0.4f)
+                        isSeparator = true;
+                    // Horizontal separator between grip and body
+                    if (Mathf.Abs(y - centerY + 2) <= 1 && relY < -0.1f && relY > -0.3f && Mathf.Abs(relX) < 0.3f)
+                        isSeparator = true;
+                    
+                    if (isSeparator)
+                    {
+                        partColor = darkColor;
+                    }
+                    
+                    // Add glow effect on the edges
+                    bool isEdge = false;
+                    // Check if this is on the edge of the gun
+                    if (x == 0 || x == w - 1 || y == 0 || y == h - 1)
+                    {
+                        // Check if neighboring cell is empty
+                        if (x > 0 && !filledCells[x-1, y]) isEdge = true;
+                        else if (x < w-1 && !filledCells[x+1, y]) isEdge = true;
+                        else if (y > 0 && !filledCells[x, y-1]) isEdge = true;
+                        else if (y < h-1 && !filledCells[x, y+1]) isEdge = true;
+                    }
+                    
+                    if (isEdge)
+                    {
+                        // Brighten the edge
+                        partColor = Color.Lerp(partColor, lightColor, 0.3f);
+                    }
+                    
+                    // Apply alpha
+                    colors[y * w + x] = new Color(partColor.r, partColor.g, partColor.b, alpha);
+                }
+                else
+                {
+                    colors[y * w + x] = Color.clear;
+                }
+            }
+        }
+        
+        tex.SetPixels(colors);
+        tex.Apply();
+        
+        Sprite sprite = Sprite.Create(tex, new Rect(0, 0, w, h), new Vector2(0.5f, 0.5f), 1f);
+        sprite.name = "GunPickup";
+        return sprite;
+    }
+}

@@ -176,7 +176,8 @@ public class EnemyManager : MonoBehaviour
                 enemyColor,
                 enemyVitalColor,
                 caController.width,
-                caController.height
+                caController.height,
+                moveInterval
             );
             enemies.Add(enemy);
         }
