@@ -460,13 +460,14 @@ public class GunPickupManager : MonoBehaviour
         int width = maxX - minX + 1;
         int height = maxY - minY + 1;
         float aspect = (float)width / height;
+        bool isWide = width > height + 3;
         float density = cellCount / (float)(width * height);
         
         // Derive stats
-        int fireRate = Mathf.RoundToInt(fireRateCurve.Evaluate(Mathf.Clamp01(cellCount / 50f)));
-        int spread = Mathf.RoundToInt(spreadCurve.Evaluate(Mathf.Clamp01(aspect)));
+        int fireRate = Mathf.RoundToInt(fireRateCurve.Evaluate(Mathf.Clamp01(density)));
+        int spread = Mathf.RoundToInt(spreadCurve.Evaluate(Mathf.Clamp01(isWide ? (aspect/10) + 0.25f : (aspect/10) - 0.25f)));
         int AOE = Mathf.RoundToInt(AOECurve.Evaluate(Mathf.Clamp01(cellCount / 100f)));
-        int decay = Mathf.Max(1, Mathf.RoundToInt(cellCount / 10f));
+        int decay = Mathf.Max(1, Mathf.RoundToInt(cellCount / 100f));
         
         // Generate rules
         string birthStr = GenerateRuleFromShape(cells);
@@ -476,9 +477,9 @@ public class GunPickupManager : MonoBehaviour
         // Gun color (variation of main CA color)
         Vector3 mainColor = caController.automatonID;
         Vector3 gunColor = new Vector3(
-            Mathf.Clamp01(mainColor.x + UnityEngine.Random.Range(-0.2f, 0.2f)),
-            Mathf.Clamp01(mainColor.y + UnityEngine.Random.Range(-0.2f, 0.2f)),
-            Mathf.Clamp01(mainColor.z + UnityEngine.Random.Range(-0.2f, 0.2f))
+            Mathf.Clamp01(mainColor.x + UnityEngine.Random.Range(-0.8f, 0.8f)),
+            Mathf.Clamp01(mainColor.y + UnityEngine.Random.Range(-0.8f, 0.8f)),
+            Mathf.Clamp01(mainColor.z + UnityEngine.Random.Range(-0.8f, 0.8f))
         );
         
         return new GunData(rules, gunColor, fireRate, spread, AOE, decay);
