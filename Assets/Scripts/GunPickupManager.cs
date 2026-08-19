@@ -470,8 +470,8 @@ public class GunPickupManager : MonoBehaviour
         int decay = Mathf.Max(1, Mathf.RoundToInt(cellCount / 100f));
         
         // Generate rules
-        string birthStr = GenerateRuleFromShape(cells);
-        string survivalStr = GenerateRuleFromShape(cells);
+        string birthStr = GenerateRuleFromShape(cells, true);
+        string survivalStr = GenerateRuleFromShape(cells, false);
         string rules = $"{birthStr}/{survivalStr}/{decay}";
         
         // Gun color (variation of main CA color)
@@ -485,13 +485,25 @@ public class GunPickupManager : MonoBehaviour
         return new GunData(rules, gunColor, fireRate, spread, AOE, decay);
     }
 
-    string GenerateRuleFromShape(HashSet<Vector2Int> cells)
+    string GenerateRuleFromShape(HashSet<Vector2Int> cells, bool isBirth)
     {
-        int count = cells.Count % 9;
-        string digits = "";
-        for (int i = 0; i < Mathf.Min(count + 1, 5); i++)
-            digits += UnityEngine.Random.Range(0, 9).ToString();
-        return digits;
+        int maxRuleLength = Mathf.Clamp(Mathf.CeilToInt(cells.Count / 10f), 1, isBirth ? 6 : 9);
+        int cellCountInfluence = Mathf.Abs(cells.Count * 7919) % 88888888;
+        int randomValue = UnityEngine.Random.Range(0, 88888888);
+        int num = (cellCountInfluence + randomValue) % 88888888;
+        List<char> unique = new List<char>();
+
+        foreach (char ch in num.ToString())
+        {
+            if (isBirth && (ch == '9' || ch == '0' || ch == '1')) continue;
+            if (!isBirth && ch == '9') continue;
+            if (unique.Contains(ch)) continue;
+
+            unique.Add(ch);
+            if (unique.Count >= maxRuleLength) break;
+        }
+
+        return new string(unique.ToArray());
     }
 
     bool VerifyShapeMatchesTemplate(HashSet<Vector2Int> cells, Vector2Int center)
