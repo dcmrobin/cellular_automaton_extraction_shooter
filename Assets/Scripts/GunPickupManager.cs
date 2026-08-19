@@ -520,9 +520,9 @@ public class GunPickupManager : MonoBehaviour
         int maxGirth,
         Color[] snapshot)
     {
-        // Find the tip of this part - cells with no same-part neighbour further
-        // along growDir. Per-cell (not per-row) so irregular/tapered template
-        // shapes are handled correctly.
+        // ---- Length: unchanged. Per-column tapering here is intentional -
+        // it's what lets the barrel trail off naturally where CA runs out,
+        // exactly as originally requested.
         List<Vector2Int> active = new List<Vector2Int>();
         foreach (var kvp in partOf)
         {
@@ -533,10 +533,6 @@ public class GunPickupManager : MonoBehaviour
         }
         if (active.Count == 0) return;
 
-        // --- Length: push the frontier forward, one column/row of cells at a
-        // time. A frontier cell only survives to the next step if the CA
-        // actually has a live cell under the candidate position - this is what
-        // makes the barrel taper off naturally instead of drawing into empty air.
         for (int step = 0; step < maxExtension && active.Count > 0; step++)
         {
             var next = new List<Vector2Int>();
@@ -553,30 +549,50 @@ public class GunPickupManager : MonoBehaviour
             active = next;
         }
 
-        // --- Girth: thicken the part outward perpendicular to its growth axis,
-        // one ring at a time, again gated on live CA support. Interior cells
-        // naturally no-op here since their neighbour is already occupied - only
-        // true edges actually add anything.
+        // ---- Girth: uniform across the WHOLE part, not per-cell. -----
+        // Old approach let each column's tip decide independently whether it
+        // had CA support to thicken, which produced inconsistent width along
+        // the barrel (some columns 3-thick, neighbours 1-thick). Instead, each
+        // depth ring is all-or-nothing: only add ring d to every column if
+        // EVERY cell in that ring is CA-supported. The instant one cell fails,
+        // stop growing that direction for the whole part - this keeps the
+        // girth constant along the entire length instead of patchy.
         foreach (var thickenDir in thickenDirs)
         {
-            var edge = new List<Vector2Int>();
+            // Snapshot of the part's footprint before this direction's
+            // thickening (includes the length growth above).
+            List<Vector2Int> baseCells = new List<Vector2Int>();
             foreach (var kvp in partOf)
-                if (kvp.Value == part) edge.Add(kvp.Key);
+                if (kvp.Value == part) baseCells.Add(kvp.Key);
 
-            for (int depth = 0; depth < maxGirth && edge.Count > 0; depth++)
+            for (int depth = 1; depth <= maxGirth; depth++)
             {
-                var newEdge = new List<Vector2Int>();
-                foreach (var cell in edge)
-                {
-                    Vector2Int candidate = cell + thickenDir;
-                    if (!InBounds(candidate) || gunCells.Contains(candidate)) continue;
-                    if (!IsMainCAAlive(candidate, snapshot)) continue;
+                var ring = new List<Vector2Int>();
+                bool ringFullySupported = true;
 
+                foreach (var cell in baseCells)
+                {
+                    Vector2Int candidate = cell + thickenDir * depth;
+
+                    // Already claimed by the gun (e.g. overlapping another
+                    // part's growth) - not a support failure, just skip it.
+                    if (gunCells.Contains(candidate)) continue;
+
+                    if (!InBounds(candidate) || !IsMainCAAlive(candidate, snapshot))
+                    {
+                        ringFullySupported = false;
+                        break;
+                    }
+                    ring.Add(candidate);
+                }
+
+                if (!ringFullySupported) break;
+
+                foreach (var candidate in ring)
+                {
                     gunCells.Add(candidate);
                     partOf[candidate] = part;
-                    newEdge.Add(candidate);
                 }
-                edge = newEdge;
             }
         }
     }
