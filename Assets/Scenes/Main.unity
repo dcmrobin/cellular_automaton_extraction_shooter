@@ -261,7 +261,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0.07648, y: 0, z: 0}
-  m_LocalScale: {x: 0.10342201, y: 0.020184569, z: 0.0315}
+  m_LocalScale: {x: 0.01, y: 0.01, z: 0.01}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 1672746128}
@@ -685,8 +685,8 @@ MonoBehaviour:
       inWeight: 0.33333334
       outWeight: 0.6453044
     - serializedVersion: 3
-      time: 0.6428997
-      value: 8.81032
+      time: 0.68457144
+      value: 3.702837
       inSlope: -24.933228
       outSlope: -24.933228
       tangentMode: 0
