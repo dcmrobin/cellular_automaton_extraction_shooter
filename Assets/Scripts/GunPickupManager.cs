@@ -15,11 +15,27 @@ public class GunPickupManager : MonoBehaviour
     public GameObject gunPickupPrefab;
 
     [Header("Detection")]
-    public Texture2D templateTexture;
+    public Texture2D templateTextureSmall;
+    public Texture2D templateTextureLarge;
+    [Range(0f, 1f)]
+    public float largeTemplateChance = 0.5f;
+
     public float scanInterval = 3f;
     [Range(0.5f, 1f)]
     public float matchThreshold = 0.7f;
     public int scanStride = 2;
+
+    // Everything needed to scan/generate for one template, built once at Start.
+    private class TemplateData
+    {
+        public Texture2D texture;
+        public int width;
+        public int height;
+        public Dictionary<Vector2Int, GunPart> partMap;
+        public HashSet<Vector2Int> solidLocal;
+    }
+
+    private TemplateData[] templates;
 
     [Header("Stats Derivation")]
     public AnimationCurve fireRateCurve = AnimationCurve.Linear(0, 1, 1, 30);
@@ -71,34 +87,76 @@ public class GunPickupManager : MonoBehaviour
         if (playerController == null) playerController = FindObjectOfType<PlayerController>();
         if (enemyManager == null) enemyManager = FindObjectOfType<EnemyManager>();
 
-        if (templateTexture == null)
+        if (templateTextureSmall == null || templateTextureLarge == null)
         {
-            Debug.LogError("GunPickupManager: No template texture assigned!");
+            Debug.LogError("GunPickupManager: Both templateTextureSmall and templateTextureLarge must be assigned!");
             enabled = false;
             return;
         }
 
-        // Get template dimensions
-        templateWidth = templateTexture.width;
-        templateHeight = templateTexture.height;
-
-        BuildTemplatePartMap();
-
-        // Find kernels using the safe method
         if (caController != null)
         {
             kernelScanForGuns = caController.GetKernelIndex("ScanForGuns");
             kernelClearGunCells = caController.GetKernelIndex("ClearGunCells");
-            
+
             Debug.Log($"GunPickupManager: ScanForGuns kernel index: {kernelScanForGuns}");
             Debug.Log($"GunPickupManager: ClearGunCells kernel index: {kernelClearGunCells}");
         }
 
-        // Initialize GPU buffers
         InitializeGPUBuffers();
 
-        // Upload template to GPU
-        UploadTemplateToGPU();
+        templates = new TemplateData[]
+        {
+            BuildTemplateData(templateTextureSmall),
+            BuildTemplateData(templateTextureLarge)
+        };
+    }
+
+    TemplateData BuildTemplateData(Texture2D tex)
+    {
+        var data = new TemplateData
+        {
+            texture = tex,
+            width = tex.width,
+            height = tex.height,
+            partMap = new Dictionary<Vector2Int, GunPart>(),
+            solidLocal = new HashSet<Vector2Int>()
+        };
+
+        if (!tex.isReadable)
+        {
+            Debug.LogError($"GunPickupManager: template '{tex.name}' must have Read/Write Enabled for part classification.");
+            return data;
+        }
+
+        int centerX = data.width / 2;
+        int centerY = data.height / 2;
+
+        for (int y = 0; y < data.height; y++)
+        {
+            for (int x = 0; x < data.width; x++)
+            {
+                Color px = tex.GetPixel(x, y);
+                if (px.a <= 0.5f) continue;
+
+                Vector2Int local = new Vector2Int(x, y);
+                data.solidLocal.Add(local);
+
+                float relX = (float)(x - centerX) / Mathf.Max(1, centerX);
+                float relY = (float)(y - centerY) / Mathf.Max(1, centerY);
+
+                GunPart part = GunPart.Body;
+                if (relX > 0.2f && Mathf.Abs(relY) < 0.3f) part = GunPart.Barrel;
+                else if (relX < -0.2f && relY < -0.2f) part = GunPart.Handle;
+                else if (relY < -0.3f && Mathf.Abs(relX) < 0.3f) part = GunPart.Grip;
+                else if (relY > 0.3f && Mathf.Abs(relX) < 0.2f) part = GunPart.Sight;
+
+                data.partMap[local] = part;
+            }
+        }
+
+        Debug.Log($"GunPickupManager: template '{tex.name}' - {data.solidLocal.Count} solid cells out of {data.width * data.height} total.");
+        return data;
     }
 
     void OnDestroy()
@@ -116,32 +174,6 @@ public class GunPickupManager : MonoBehaviour
         matchCountBuffer = new ComputeBuffer(1, sizeof(int));
         matchCountData[0] = 0;
         matchCountBuffer.SetData(matchCountData);
-    }
-
-    void UploadTemplateToGPU()
-    {
-        ComputeShader shader = caController.cellularAutomaton;
-        if (shader == null || kernelScanForGuns < 0) return;
-
-        // Upload template as a texture (already available)
-        shader.SetTexture(kernelScanForGuns, "TemplateTexture", templateTexture);
-        
-        // Set template dimensions
-        shader.SetInt("TemplateWidth", templateWidth);
-        shader.SetInt("TemplateHeight", templateHeight);
-        shader.SetInt("ScanStride", scanStride);
-        shader.SetFloat("MatchThreshold", matchThreshold);
-        
-        // Set output buffers
-        shader.SetBuffer(kernelScanForGuns, "MatchResults", matchResultsBuffer);
-        shader.SetBuffer(kernelScanForGuns, "MatchCount", matchCountBuffer);
-        
-        // Also set for clear kernel
-        if (kernelClearGunCells >= 0)
-        {
-            shader.SetBuffer(kernelClearGunCells, "MatchResults", matchResultsBuffer);
-            shader.SetBuffer(kernelClearGunCells, "MatchCount", matchCountBuffer);
-        }
     }
 
     void Update()
@@ -209,32 +241,38 @@ public class GunPickupManager : MonoBehaviour
             return;
         }
 
+        // Pick ONE template for this entire scan - single dispatch, not one
+        // pass per template. This is what keeps overall gun frequency down:
+        // each scan interval only ever tests candidate cells against one
+        // template's silhouette, never both.
+        TemplateData template = (UnityEngine.Random.value < largeTemplateChance)
+            ? templates[1]
+            : templates[0];
+
         ComputeShader shader = caController.cellularAutomaton;
         
         try
         {
-            // Reset match count
             matchCountData[0] = 0;
             matchCountBuffer.SetData(matchCountData);
             
-            // Set all required textures and parameters
             shader.SetTexture(kernelScanForGuns, "World", caController.CurrentTexture);
-            shader.SetTexture(kernelScanForGuns, "TemplateTexture", templateTexture);
+            shader.SetTexture(kernelScanForGuns, "TemplateTexture", template.texture);
             
             shader.SetInt("Width", caController.width);
             shader.SetInt("Height", caController.height);
             shader.SetInt("Decay", caController.Decay);
             
-            shader.SetInt("TemplateWidth", templateWidth);
-            shader.SetInt("TemplateHeight", templateHeight);
+            shader.SetInt("TemplateWidth", template.width);
+            shader.SetInt("TemplateHeight", template.height);
             shader.SetInt("ScanStride", scanStride);
             shader.SetFloat("MatchThreshold", matchThreshold);
             
             shader.SetBuffer(kernelScanForGuns, "MatchResults", matchResultsBuffer);
             shader.SetBuffer(kernelScanForGuns, "MatchCount", matchCountBuffer);
             
-            int groupsX = Mathf.CeilToInt((caController.width - templateWidth) / (float)(scanStride * 8));
-            int groupsY = Mathf.CeilToInt((caController.height - templateHeight) / (float)(scanStride * 8));
+            int groupsX = Mathf.CeilToInt((caController.width - template.width) / (float)(scanStride * 8));
+            int groupsY = Mathf.CeilToInt((caController.height - template.height) / (float)(scanStride * 8));
             groupsX = Mathf.Max(1, groupsX);
             groupsY = Mathf.Max(1, groupsY);
             
@@ -248,10 +286,6 @@ public class GunPickupManager : MonoBehaviour
             matchResultsBuffer.GetData(matchResultsData, 0, 0, Math.Min(matchCount, MAX_MATCHES));
 
             var dedupedMatches = DeduplicateMatches(matchResultsData, matchCount);
-
-            // Overlap-check only here - do NOT clear anything yet. Clearing has
-            // to wait until after we've generated the gun shape from a snapshot
-            // that still shows these cells intact.
             var acceptedMatches = new List<MatchResult>();
 
             foreach (MatchResult match in dedupedMatches)
@@ -293,17 +327,15 @@ public class GunPickupManager : MonoBehaviour
 
             if (acceptedMatches.Count == 0) return;
 
-            // Take ONE fresh snapshot now, while all accepted matches' cells are
-            // still intact in World. Generate every gun from this snapshot, and
-            // only clear a match's cells from the CA after its pickup has
-            // actually been created - never before.
+            // All matches from this scan used the same template, so it's safe
+            // to capture it once in the closure rather than track it per-match.
             caController.RequestColorData(freshSnapshot =>
             {
                 if (freshSnapshot == null) return;
 
                 foreach (MatchResult match in acceptedMatches)
                 {
-                    bool created = CreatePickupFromMatch(match, freshSnapshot);
+                    bool created = CreatePickupFromMatch(match, freshSnapshot, template);
                     if (created)
                     {
                         ClearCellsFromCA(match);
@@ -398,14 +430,13 @@ public class GunPickupManager : MonoBehaviour
         });
     }
 
-    bool CreatePickupFromMatch(MatchResult match, Color[] snapshot)
+    bool CreatePickupFromMatch(MatchResult match, Color[] snapshot, TemplateData template)
     {
         HashSet<Vector2Int> matchedCells = ExtractCellsFromMatch(match, snapshot);
         if (matchedCells.Count < 5) return false;
-        if (!VerifyShapeMatchesTemplate(matchedCells, new Vector2Int(match.center.x, match.center.y)))
-            return false;
+        if (!VerifyShapeMatchesTemplate(matchedCells, template)) return false;
 
-        HashSet<Vector2Int> gunCells = GenerateGunShape(match, snapshot);
+        HashSet<Vector2Int> gunCells = GenerateGunShape(match, snapshot, template);
         if (gunCells.Count < 5) return false;
 
         GunData data = DeriveGunStats(gunCells);
@@ -611,7 +642,7 @@ public class GunPickupManager : MonoBehaviour
         return a > 0.5f && a < 1.5f;
     }
 
-    HashSet<Vector2Int> GenerateGunShape(MatchResult match, Color[] snapshot)
+    HashSet<Vector2Int> GenerateGunShape(MatchResult match, Color[] snapshot, TemplateData template)
     {
         var gunCells = new HashSet<Vector2Int>();
         var partOf = new Dictionary<Vector2Int, GunPart>();
@@ -619,19 +650,15 @@ public class GunPickupManager : MonoBehaviour
         int startX = match.minX;
         int startY = match.minY;
 
-        // 1. Stamp the base template silhouette into world space, unmodified.
-        // This guarantees the gun always reads as a gun before any growth happens.
-        foreach (var local in templateSolidLocal)
+        foreach (var local in template.solidLocal)
         {
             Vector2Int world = new Vector2Int(startX + local.x, startY + local.y);
             gunCells.Add(world);
-            partOf[world] = templatePartMap[local];
+            partOf[world] = template.partMap[local];
         }
 
         if (snapshot == null) return gunCells;
 
-        // 2. Extend the barrel to the right and thicken it vertically -
-        //    but only where real, currently-alive main CA cells exist to grow into.
         GrowPart(gunCells, partOf, GunPart.Barrel,
                 growDir: new Vector2Int(1, 0),
                 thickenDirs: new[] { Vector2Int.up, Vector2Int.down },
@@ -639,7 +666,6 @@ public class GunPickupManager : MonoBehaviour
                 maxGirth: maxBarrelGirth,
                 snapshot: snapshot);
 
-        // 3. Same treatment for the grip, extending/thickening downward.
         GrowPart(gunCells, partOf, GunPart.Grip,
                 growDir: new Vector2Int(0, -1),
                 thickenDirs: new[] { Vector2Int.left, Vector2Int.right },
@@ -647,59 +673,12 @@ public class GunPickupManager : MonoBehaviour
                 maxGirth: maxGripGirth,
                 snapshot: snapshot);
 
-        // Stash the part map for CreateSpriteFromCells to use for coloring.
         lastGunPartMap = partOf;
         return gunCells;
     }
 
     // Populated by GenerateGunShape immediately before CreateSpriteFromCells is called.
     private Dictionary<Vector2Int, GunPart> lastGunPartMap;
-
-    void BuildTemplatePartMap()
-    {
-        if (!templateTexture.isReadable)
-        {
-            Debug.LogError("GunPickupManager: templateTexture must have Read/Write Enabled in its import settings for part classification.");
-            return;
-        }
-
-        templatePartMap = new Dictionary<Vector2Int, GunPart>();
-        templateSolidLocal = new HashSet<Vector2Int>();
-
-        int centerX = templateWidth / 2;
-        int centerY = templateHeight / 2;
-
-        for (int y = 0; y < templateHeight; y++)
-        {
-            for (int x = 0; x < templateWidth; x++)
-            {
-                Color px = templateTexture.GetPixel(x, y);
-
-                // The gun shape is white-on-transparent: RGB can be white
-                // everywhere (including "empty" regions, depending on how the
-                // PNG was authored), so alpha is the only reliable signal for
-                // "is this pixel actually part of the gun." Testing px.r here
-                // was why every pixel in the sprite rect counted as solid.
-                if (px.a <= 0.5f) continue;
-
-                Vector2Int local = new Vector2Int(x, y);
-                templateSolidLocal.Add(local);
-
-                float relX = (float)(x - centerX) / Mathf.Max(1, centerX);
-                float relY = (float)(y - centerY) / Mathf.Max(1, centerY);
-
-                GunPart part = GunPart.Body;
-                if (relX > 0.2f && Mathf.Abs(relY) < 0.3f) part = GunPart.Barrel;
-                else if (relX < -0.2f && relY < -0.2f) part = GunPart.Handle;
-                else if (relY < -0.3f && Mathf.Abs(relX) < 0.3f) part = GunPart.Grip;
-                else if (relY > 0.3f && Mathf.Abs(relX) < 0.2f) part = GunPart.Sight;
-
-                templatePartMap[local] = part;
-            }
-        }
-
-        Debug.Log($"GunPickupManager: template part map built - {templateSolidLocal.Count} solid cells out of {templateWidth * templateHeight} total.");
-    }
 
     string GenerateRuleFromShape(HashSet<Vector2Int> cells, bool isBirth)
     {
@@ -722,9 +701,8 @@ public class GunPickupManager : MonoBehaviour
         return new string(unique.ToArray());
     }
 
-    bool VerifyShapeMatchesTemplate(HashSet<Vector2Int> cells, Vector2Int center)
+    bool VerifyShapeMatchesTemplate(HashSet<Vector2Int> cells, TemplateData template)
     {
-        // Calculate the bounding box of the cells
         int minX = int.MaxValue, maxX = int.MinValue;
         int minY = int.MaxValue, maxY = int.MinValue;
         foreach (var p in cells)
@@ -734,18 +712,16 @@ public class GunPickupManager : MonoBehaviour
             if (p.y < minY) minY = p.y;
             if (p.y > maxY) maxY = p.y;
         }
-        
+
         int width = maxX - minX + 1;
         int height = maxY - minY + 1;
-        
-        // Check if size matches template roughly
-        if (width > templateWidth * 3 || height > templateHeight * 3) return false;
-        if (width < templateWidth / 3 || height < templateHeight / 3) return false;
-        
-        // Check cell count ratio
+
+        if (width > template.width * 3 || height > template.height * 3) return false;
+        if (width < template.width / 3 || height < template.height / 3) return false;
+
         float cellDensity = cells.Count / (float)(width * height);
         if (cellDensity < 0.3f) return false;
-        
+
         return true;
     }
 

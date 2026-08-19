@@ -617,7 +617,9 @@ MonoBehaviour:
   playerController: {fileID: 819505588}
   enemyManager: {fileID: 737852859}
   gunPickupPrefab: {fileID: 2398867272060062185, guid: dedba451d1c0cc648be1c0f056628817, type: 3}
-  templateTexture: {fileID: 2800000, guid: 7435e33c1259184449dfba06da3552d1, type: 3}
+  templateTextureSmall: {fileID: 2800000, guid: 7435e33c1259184449dfba06da3552d1, type: 3}
+  templateTextureLarge: {fileID: 2800000, guid: 85cc2e2851b11d2428e643617951f53a, type: 3}
+  largeTemplateChance: 0.7
   scanInterval: 5
   matchThreshold: 0.8
   scanStride: 2
@@ -730,7 +732,7 @@ MonoBehaviour:
     m_PostInfinity: 2
     m_RotationOrder: 4
   maxBarrelExtension: 15
-  maxBarrelGirth: 4
+  maxBarrelGirth: 6
   maxGripExtension: 4
   maxGripGirth: 3
 --- !u!4 &1671443601
