@@ -282,8 +282,18 @@ public class PlayerController : MonoBehaviour
 
             if (anyEaten)
             {
-                RedistributeAliveSegments();
+                // Clear with whatever buffer is CURRENTLY bound - that's what the
+                // last DrawPlayer actually used, so it's the correct layout to clear.
                 ClearPlayer(prevOrigin);
+
+                // Recompute compacted offsets/alive/vitalOffsetIndex on the CPU.
+                RedistributeAliveSegments();
+
+                // Force the GPU buffer to catch up NOW, before we draw, so the
+                // buffer DrawPlayer binds actually matches the vitalOffsetIndex
+                // we just computed - otherwise we're back to the same mismatch.
+                ApplyBufferUpdates();
+
                 DrawPlayer();
             }
         });
@@ -438,12 +448,10 @@ public class PlayerController : MonoBehaviour
     {
         if (!buffersNeedUpdate) return;
         
-        // Swap buffer indices
-        int temp = currentBufferIndex;
-        currentBufferIndex = nextBufferIndex;
-        nextBufferIndex = temp;
-        
-        // Update the buffer that will be used next frame
+        // Write fresh data into nextBufferIndex (the buffer NOT currently bound)
+        // BEFORE swapping, so that once we swap, currentBufferIndex actually points
+        // at the buffer that just got the new data - not the one we're about to
+        // overwrite on the *following* call.
         if (offsetsChanged)
         {
             offsetsBuffers[nextBufferIndex].SetData(offsets);
@@ -456,6 +464,11 @@ public class PlayerController : MonoBehaviour
             aliveBuffers[nextBufferIndex].SetData(aliveInts);
             aliveChanged = false;
         }
+        
+        // Now swap - currentBufferIndex points at the buffer we just wrote.
+        int temp = currentBufferIndex;
+        currentBufferIndex = nextBufferIndex;
+        nextBufferIndex = temp;
         
         buffersNeedUpdate = false;
     }
