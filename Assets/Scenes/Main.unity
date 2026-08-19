@@ -729,6 +729,10 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
+  maxBarrelExtension: 15
+  maxBarrelGirth: 4
+  maxGripExtension: 4
+  maxGripGirth: 3
 --- !u!4 &1671443601
 Transform:
   m_ObjectHideFlags: 0

@@ -458,7 +458,14 @@ float CheckTemplateMatch(int startX, int startY)
         for (int x = 0; x < TemplateWidth; x++)
         {
             float4 templatePixel = TemplateTexture[int2(x, y)];
-            bool templateSolid = templatePixel.r > 0.5f;
+            // Template is white-shape-on-transparent: RGB is white
+            // everywhere including the "empty" background, only alpha
+            // distinguishes gun pixels from background. Testing .r here
+            // treated the whole TemplateWidth x TemplateHeight rectangle
+            // as solid, which is why matching effectively required CA
+            // cells to fill the entire bounding box rather than just the
+            // actual gun silhouette.
+            bool templateSolid = templatePixel.a > 0.5f;
             if (!templateSolid) continue;
             
             total++;
@@ -498,7 +505,9 @@ void ScanForGuns(uint3 id : SV_DispatchThreadID)
         for (int x = 0; x < TemplateWidth && solidCount < 3; x++)
         {
             float4 templatePixel = TemplateTexture[int2(x, y)];
-            if (templatePixel.r > 0.5f)
+            // Same fix as CheckTemplateMatch: alpha marks the gun shape,
+            // not red - RGB is white across the whole sprite rect.
+            if (templatePixel.a > 0.5f)
             {
                 int2 worldPos = int2(startX + x, startY + y);
                 float4 cell = World[worldPos];
@@ -526,13 +535,11 @@ void ScanForGuns(uint3 id : SV_DispatchThreadID)
             int2 center = int2(startX + TemplateWidth/2, startY + TemplateHeight/2);
             result.center = center;
             
-            // Store the template area as the bounds
             result.minX = startX;
             result.maxX = startX + TemplateWidth;
             result.minY = startY;
             result.maxY = startY + TemplateHeight;
             
-            // Count cells in the template area
             result.cellCount = 0;
             for (int y = startY; y < startY + TemplateHeight; y++)
             {
