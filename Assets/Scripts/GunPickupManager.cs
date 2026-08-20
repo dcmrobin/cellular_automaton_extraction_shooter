@@ -440,7 +440,7 @@ public class GunPickupManager : MonoBehaviour
         if (gunCells.Count < 5) return false;
 
         GunData data = DeriveGunStats(gunCells);
-        Sprite sprite = CreateSpriteFromCells(gunCells, data, snapshot);
+        Sprite sprite = CreateSpriteFromCells(gunCells, data, snapshot, new Vector2Int(match.center.x, match.center.y));
 
         GameObject pickupObj = Instantiate(gunPickupPrefab);
         GunPickup pickup = pickupObj.GetComponent<GunPickup>();
@@ -725,7 +725,7 @@ public class GunPickupManager : MonoBehaviour
         return true;
     }
 
-    Sprite CreateSpriteFromCells(HashSet<Vector2Int> cells, GunData data, Color[] snapshot)
+    Sprite CreateSpriteFromCells(HashSet<Vector2Int> cells, GunData data, Color[] snapshot, Vector2Int anchorPos)
     {
         // Calculate bounding box
         int minX = int.MaxValue, maxX = int.MinValue;
@@ -765,8 +765,6 @@ public class GunPickupManager : MonoBehaviour
             1f
         );
         
-        // Get snapshot for alpha values
-        //Color[] snapshot = caController.LatestSnapshot;
         int width = caController.width;
         
         // First pass: determine which cells are part of the gun
@@ -783,7 +781,6 @@ public class GunPickupManager : MonoBehaviour
         // Second pass: fill in dead cells (holes) within the gun shape
         bool[,] filledCells = (bool[,])isGunCell.Clone();
         
-        // Fill holes: any empty cell surrounded by solid cells on 4 sides becomes filled
         for (int y = 1; y < h - 1; y++)
         {
             for (int x = 1; x < w - 1; x++)
@@ -800,11 +797,11 @@ public class GunPickupManager : MonoBehaviour
             }
         }
         
-        // Calculate center for part detection
+        // Calculate center for part detection (unrelated to pivot - this just
+        // drives the barrel/handle/grip/sight coloring bands within the texture)
         int centerX = w / 2;
         int centerY = h / 2;
         
-        // Generate colors for each pixel
         for (int y = 0; y < h; y++)
         {
             for (int x = 0; x < w; x++)
@@ -814,7 +811,6 @@ public class GunPickupManager : MonoBehaviour
                 
                 if (isSolid)
                 {
-                    // Get alpha from CA state if available
                     float alpha = 0.85f;
                     float state = 1f;
                     
@@ -825,19 +821,16 @@ public class GunPickupManager : MonoBehaviour
                         state = cellColor.a;
                         
                         if (state > 0.5f && state < 1.5f)
-                            alpha = 0.95f; // Alive
+                            alpha = 0.95f;
                         else if (state >= 1.5f && state < caController.Decay)
-                            alpha = 0.7f - (state - 1.5f) / (caController.Decay - 1.5f) * 0.3f; // Decaying
+                            alpha = 0.7f - (state - 1.5f) / (caController.Decay - 1.5f) * 0.3f;
                         else
-                            alpha = 0.5f; // Dead but filled
+                            alpha = 0.5f;
                     }
                     
-                    // Keep relX/relY - the separator and edge-glow logic further down still
-                    // uses them for line placement. But part *color* now comes from the real
-                    // generated part map instead of a positional guess.
                     float relX = (float)(x - centerX) / centerX;
                     float relY = (float)(y - centerY) / centerY;
-
+                    
                     GunPart partHere = GunPart.Body;
                     lastGunPartMap?.TryGetValue(pos, out partHere);
 
@@ -851,7 +844,6 @@ public class GunPickupManager : MonoBehaviour
                         default:             partColor = baseColor; break;
                     }
                     
-                    // Add horizontal lines (futuristic look)
                     bool isHorizontalLine = false;
                     int lineSpacing = 3;
                     for (int lineY = 0; lineY < h; lineY += lineSpacing)
@@ -863,17 +855,14 @@ public class GunPickupManager : MonoBehaviour
                         }
                     }
                     
-                    if (isHorizontalLine && !(relX > 0.2f && Mathf.Abs(relY) < 0.3f)) // Don't line the barrel
+                    if (isHorizontalLine && !(relX > 0.2f && Mathf.Abs(relY) < 0.3f))
                     {
                         partColor = Color.Lerp(partColor, darkColor, 0.4f);
                     }
                     
-                    // Add part separators (dark lines between parts)
                     bool isSeparator = false;
-                    // Vertical separator between barrel and body
                     if (Mathf.Abs(x - centerX - 2) <= 1 && relX > 0 && relX < 0.3f && Mathf.Abs(relY) < 0.4f)
                         isSeparator = true;
-                    // Horizontal separator between grip and body
                     if (Mathf.Abs(y - centerY + 2) <= 1 && relY < -0.1f && relY > -0.3f && Mathf.Abs(relX) < 0.3f)
                         isSeparator = true;
                     
@@ -882,12 +871,9 @@ public class GunPickupManager : MonoBehaviour
                         partColor = darkColor;
                     }
                     
-                    // Add glow effect on the edges
                     bool isEdge = false;
-                    // Check if this is on the edge of the gun
                     if (x == 0 || x == w - 1 || y == 0 || y == h - 1)
                     {
-                        // Check if neighboring cell is empty
                         if (x > 0 && !filledCells[x-1, y]) isEdge = true;
                         else if (x < w-1 && !filledCells[x+1, y]) isEdge = true;
                         else if (y > 0 && !filledCells[x, y-1]) isEdge = true;
@@ -896,11 +882,9 @@ public class GunPickupManager : MonoBehaviour
                     
                     if (isEdge)
                     {
-                        // Brighten the edge
                         partColor = Color.Lerp(partColor, lightColor, 0.3f);
                     }
                     
-                    // Apply alpha
                     colors[y * w + x] = new Color(partColor.r, partColor.g, partColor.b, alpha);
                 }
                 else
@@ -912,8 +896,11 @@ public class GunPickupManager : MonoBehaviour
         
         tex.SetPixels(colors);
         tex.Apply();
-        
-        Sprite sprite = Sprite.Create(tex, new Rect(0, 0, w, h), new Vector2(0.5f, 0.5f), 1f);
+
+        float pivotX = Mathf.Clamp01((anchorPos.x - minX + padding + 0.5f) / w);
+        float pivotY = Mathf.Clamp01((anchorPos.y - minY + padding + 0.5f) / h);
+
+        Sprite sprite = Sprite.Create(tex, new Rect(0, 0, w, h), new Vector2(pivotX, pivotY), 1f);
         sprite.name = "GunPickup";
         return sprite;
     }

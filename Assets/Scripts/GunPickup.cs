@@ -75,8 +75,14 @@ public class GunPickup : MonoBehaviour
             
             if (gun.muzzle != null)
             {
-                Vector3 worldMuzzle = GridToWorld(muzzlePosition, caController);
-                gun.muzzle.position = worldMuzzle;
+                Bounds b = caController.targetRenderer.bounds;
+                float cellWidth = b.size.x / caController.width;
+                float cellHeight = b.size.y / caController.height;
+
+                Vector2Int deltaGrid = muzzlePosition - gridPosition;
+                Vector3 localOffset = new Vector3(deltaGrid.x * cellWidth, deltaGrid.y * cellHeight, 0f);
+
+                gun.muzzle.localPosition = localOffset;
                 gun.body.sprite = GetComponent<SpriteRenderer>().sprite;
             }
             
