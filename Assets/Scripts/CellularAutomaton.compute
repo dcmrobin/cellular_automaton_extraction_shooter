@@ -10,6 +10,7 @@
 #pragma kernel ScanForGuns
 #pragma kernel ClearGunCells
 #pragma kernel ClearPositions
+#pragma kernel ClearAllGunCA
 
 RWTexture2D<float4> Result;
 Texture2D<float4> Current;
@@ -681,4 +682,30 @@ int2 GetRotatedPos(int x, int y, int rotation, int startX, int startY)
     
     // Translate back and add offset
     return int2(startX + cx + rx, startY + cy + ry);
+}
+
+// ------------------------------------------------------------------
+// ClearAllGunCA - Full-grid reset of every gun CA cell, regardless of
+// its current alpha/decay value. Used when a gun is picked up, so any
+// gun CA left scattered around the world (from previous impacts, decay
+// in progress, etc.) is wiped clean rather than only clearing the cells
+// under the specific gun that was picked up.
+// ------------------------------------------------------------------
+[numthreads(8, 8, 1)]
+void ClearAllGunCA(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)Width || id.y >= (uint)Height) return;
+
+    int2 pos = int2(id.xy);
+    float4 cell = World[pos];
+
+    // IsGunCA checks cell.a >= 20.0 && cell.a < 30.0, which covers every
+    // gun CA state (alive at 20, decaying anywhere in 21-30) - so this
+    // doesn't need any special-casing per alpha value, unlike a targeted
+    // impact/decay step would.
+    if (IsGunCA(cell))
+    {
+        float deadState = (Decay > 1) ? (float)Decay : 0.0;
+        World[pos] = float4(0, 0, 0, deadState);
+    }
 }

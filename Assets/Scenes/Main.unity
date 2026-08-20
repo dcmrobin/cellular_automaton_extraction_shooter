@@ -408,7 +408,7 @@ MonoBehaviour:
   cellularAutomaton: {fileID: 7200000, guid: a60b560a93f41b842a60e7e3f726abfb, type: 3}
   width: 700
   height: 700
-  updateRate: 10
+  updateRate: 40
   decayCountUp: 1
   rules: 278/3456/6
   automatonID: {x: 0, y: 0, z: 1}
@@ -627,37 +627,37 @@ MonoBehaviour:
     serializedVersion: 2
     m_Curve:
     - serializedVersion: 3
-      time: 0
-      value: 19.873291
-      inSlope: -2.6795406
-      outSlope: -2.6795406
+      time: -0.016292572
+      value: 4.8766956
+      inSlope: 22.090614
+      outSlope: 22.090614
       tangentMode: 34
       weightedMode: 0
       inWeight: 0
       outWeight: 0.33333334
     - serializedVersion: 3
-      time: 0.29425755
-      value: 19.084816
-      inSlope: -4.048802
-      outSlope: -4.048802
+      time: 0.32010287
+      value: 12.307878
+      inSlope: 3.297854
+      outSlope: 3.297854
       tangentMode: 0
       weightedMode: 0
       inWeight: 0.33333334
-      outWeight: 0.33333334
+      outWeight: 0.71467954
     - serializedVersion: 3
-      time: 0.69351935
-      value: 15.777778
-      inSlope: -11.499366
-      outSlope: -11.499366
+      time: 0.68926215
+      value: 16.671074
+      inSlope: 5.2865605
+      outSlope: 5.2865605
       tangentMode: 0
       weightedMode: 0
       inWeight: 0.3290838
-      outWeight: 0.33333334
+      outWeight: 0.686437
     - serializedVersion: 3
-      time: 1.0016878
-      value: 5.053382
-      inSlope: -34.800438
-      outSlope: -34.800438
+      time: 1.0144746
+      value: 20.346565
+      inSlope: 11.301815
+      outSlope: 11.301815
       tangentMode: 34
       weightedMode: 0
       inWeight: 0.33333334
@@ -853,7 +853,7 @@ AudioSource:
   OutputAudioMixerGroup: {fileID: 24300002, guid: 4b5d434012a46cb4f8b33bf976dbe92a, type: 2}
   m_audioClip: {fileID: 8300000, guid: 31042a1cca4cb2d448add9ab4cbb3180, type: 3}
   m_PlayOnAwake: 0
-  m_Volume: 0.7
+  m_Volume: 0.5
   m_Pitch: 1
   Loop: 0
   Mute: 0

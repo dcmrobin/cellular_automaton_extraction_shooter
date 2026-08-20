@@ -85,6 +85,10 @@ public class GunPickup : MonoBehaviour
                 gun.muzzle.localPosition = localOffset;
                 gun.body.sprite = GetComponent<SpriteRenderer>().sprite;
             }
+
+            // Full reset of gun CA across the entire world on pickup - not just
+            // the cells belonging to the gun that was just picked up.
+            caController.ClearAllGunCA();
             
             Destroy(gameObject);
         }

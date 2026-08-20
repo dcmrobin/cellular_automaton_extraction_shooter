@@ -72,6 +72,7 @@ public class CAController : MonoBehaviour
         CacheKernel("ScanForGuns");
         CacheKernel("ClearGunCells");
         CacheKernel("ClearPositions");
+        CacheKernel("ClearAllGunCA");
         
         // Get cached kernel indices
         kernelInit = GetKernelIndex("Init");
@@ -428,5 +429,37 @@ public class CAController : MonoBehaviour
         if (current != null) current.Release();
         if (next != null) next.Release();
         if (tempOutput != null) tempOutput.Release();
+    }
+
+    public void ClearAllGunCA()
+    {
+        int kernel = GetKernelIndex("ClearAllGunCA");
+        if (kernel < 0)
+        {
+            Debug.LogWarning("CA-REAPER: ClearAllGunCA kernel not found.");
+            return;
+        }
+        if (current == null || cellularAutomaton == null) return;
+
+        try
+        {
+            // Reads and writes the SAME texture in place - every other kernel
+            // here reads Current/writes Result and then swaps buffers, but this
+            // one only needs to zero out matching cells, so a plain in-place
+            // World bind (like PlayerDraw/PlayerClear use) is sufficient and
+            // avoids an unnecessary extra buffer swap.
+            cellularAutomaton.SetTexture(kernel, "World", current);
+            cellularAutomaton.SetInt("Width", width);
+            cellularAutomaton.SetInt("Height", height);
+            cellularAutomaton.SetInt("Decay", Decay);
+
+            int groupsX = Mathf.CeilToInt(width / 8f);
+            int groupsY = Mathf.CeilToInt(height / 8f);
+            cellularAutomaton.Dispatch(kernel, groupsX, groupsY, 1);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"CA-REAPER: Error in ClearAllGunCA: {e.Message}");
+        }
     }
 }
