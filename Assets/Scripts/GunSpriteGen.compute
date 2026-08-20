@@ -1,0 +1,85 @@
+#pragma kernel GenerateSprite
+
+RWTexture2D<float4> SpriteOutput;
+
+StructuredBuffer<int> FilledCells;   // w*h, 1 = filled, 0 = empty
+StructuredBuffer<int> PartId;        // w*h, -1=none 0=Body 1=Barrel 2=Handle 3=Grip 4=Sight
+StructuredBuffer<float> CellAlpha;   // w*h, precomputed alpha (0 if not solid)
+
+int SpriteWidth;
+int SpriteHeight;
+int CenterX;
+int CenterY;
+
+float4 BaseColor;
+float4 DarkColor;
+float4 LightColor;
+float4 AccentColor;
+
+int Index(int x, int y) { return y * SpriteWidth + x; }
+
+bool IsFilled(int x, int y)
+{
+    if (x < 0 || x >= SpriteWidth || y < 0 || y >= SpriteHeight) return false;
+    return FilledCells[Index(x, y)] != 0;
+}
+
+[numthreads(8,8,1)]
+void GenerateSprite(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x;
+    int y = (int)id.y;
+    if (x >= SpriteWidth || y >= SpriteHeight) return;
+
+    if (!IsFilled(x, y))
+    {
+        SpriteOutput[id.xy] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float alpha = CellAlpha[Index(x, y)];
+    int part = PartId[Index(x, y)];
+
+    float4 partColor = BaseColor;
+    if (part == 1) partColor = LightColor;       // Barrel
+    else if (part == 2) partColor = DarkColor;    // Handle
+    else if (part == 3) partColor = AccentColor;  // Grip
+    else if (part == 4) partColor = LightColor;   // Sight
+
+    float relX = (float)(x - CenterX) / max(1, CenterX);
+    float relY = (float)(y - CenterY) / max(1, CenterY);
+
+    // This is the exact per-pixel O(SpriteHeight) scan that was the main
+    // CPU hitch source - on the GPU it's just part of one thread's work,
+    // running in parallel across every pixel simultaneously.
+    bool isHorizontalLine = false;
+    int lineSpacing = 3;
+    for (int lineY = 0; lineY < SpriteHeight; lineY += lineSpacing)
+    {
+        if (abs(y - lineY) <= 1 && IsFilled(x, lineY))
+        {
+            isHorizontalLine = true;
+            break;
+        }
+    }
+
+    bool isBarrelRegion = (relX > 0.2 && abs(relY) < 0.3);
+    if (isHorizontalLine && !isBarrelRegion)
+        partColor = lerp(partColor, DarkColor, 0.4);
+
+    bool isSeparator = false;
+    if (abs(x - CenterX - 2) <= 1 && relX > 0 && relX < 0.3 && abs(relY) < 0.4)
+        isSeparator = true;
+    if (abs(y - CenterY + 2) <= 1 && relY < -0.1 && relY > -0.3 && abs(relX) < 0.3)
+        isSeparator = true;
+    if (isSeparator)
+        partColor = DarkColor;
+
+    bool isEdge = (x == 0 || x == SpriteWidth - 1 || y == 0 || y == SpriteHeight - 1)
+                  || !IsFilled(x - 1, y) || !IsFilled(x + 1, y)
+                  || !IsFilled(x, y - 1) || !IsFilled(x, y + 1);
+    if (isEdge)
+        partColor = lerp(partColor, LightColor, 0.3);
+
+    SpriteOutput[id.xy] = float4(partColor.rgb, alpha);
+}   

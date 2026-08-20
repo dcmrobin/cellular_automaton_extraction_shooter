@@ -98,6 +98,12 @@ public class GunPickup : MonoBehaviour
         }
     }
 
+    public void ApplyGeneratedSprite(Sprite sprite)
+    {
+        if (spriteRenderer != null)
+            spriteRenderer.sprite = sprite;
+    }
+
     public void Initialize(GunData data, Sprite sprite, Vector2Int pos, CAController ca, HashSet<Vector2Int> cells)
     {
         gunData = data;

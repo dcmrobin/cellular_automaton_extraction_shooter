@@ -617,6 +617,7 @@ MonoBehaviour:
   playerController: {fileID: 819505588}
   enemyManager: {fileID: 737852859}
   gunPickupPrefab: {fileID: 2398867272060062185, guid: dedba451d1c0cc648be1c0f056628817, type: 3}
+  gunSpriteShader: {fileID: 7200000, guid: 9a40dee16e5e9cc4a881a6b2ecc82757, type: 3}
   templateTextureSmall: {fileID: 2800000, guid: 7435e33c1259184449dfba06da3552d1, type: 3}
   templateTextureLarge: {fileID: 2800000, guid: 85cc2e2851b11d2428e643617951f53a, type: 3}
   largeTemplateChance: 0.7

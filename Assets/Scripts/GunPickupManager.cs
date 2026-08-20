@@ -14,6 +14,10 @@ public class GunPickupManager : MonoBehaviour
     public EnemyManager enemyManager;
     public GameObject gunPickupPrefab;
 
+    [Header("GPU Sprite Generation")]
+    public ComputeShader gunSpriteShader;
+    private int kernelGenerateSprite;
+
     [Header("Detection")]
     public Texture2D templateTextureSmall;
     public Texture2D templateTextureLarge;
@@ -110,6 +114,8 @@ public class GunPickupManager : MonoBehaviour
             BuildTemplateData(templateTextureSmall),
             BuildTemplateData(templateTextureLarge)
         };
+
+        kernelGenerateSprite = gunSpriteShader.FindKernel("GenerateSprite");
     }
 
     TemplateData BuildTemplateData(Texture2D tex)
@@ -232,121 +238,113 @@ public class GunPickupManager : MonoBehaviour
 
     void ScanForGunsGPU()
     {
-        if (caController == null || caController.cellularAutomaton == null)
-            return;
-        
+        if (caController == null || caController.cellularAutomaton == null) return;
         if (kernelScanForGuns < 0)
         {
             Debug.LogWarning("GunPickupManager: ScanForGuns kernel not available!");
             return;
         }
 
-        // Pick ONE template for this entire scan - single dispatch, not one
-        // pass per template. This is what keeps overall gun frequency down:
-        // each scan interval only ever tests candidate cells against one
-        // template's silhouette, never both.
-        TemplateData template = (UnityEngine.Random.value < largeTemplateChance)
-            ? templates[1]
-            : templates[0];
-
+        TemplateData template = (UnityEngine.Random.value < largeTemplateChance) ? templates[1] : templates[0];
         ComputeShader shader = caController.cellularAutomaton;
-        
+
         try
         {
             matchCountData[0] = 0;
             matchCountBuffer.SetData(matchCountData);
-            
+
             shader.SetTexture(kernelScanForGuns, "World", caController.CurrentTexture);
             shader.SetTexture(kernelScanForGuns, "TemplateTexture", template.texture);
-            
             shader.SetInt("Width", caController.width);
             shader.SetInt("Height", caController.height);
             shader.SetInt("Decay", caController.Decay);
-            
             shader.SetInt("TemplateWidth", template.width);
             shader.SetInt("TemplateHeight", template.height);
             shader.SetInt("ScanStride", scanStride);
             shader.SetFloat("MatchThreshold", matchThreshold);
-            
             shader.SetBuffer(kernelScanForGuns, "MatchResults", matchResultsBuffer);
             shader.SetBuffer(kernelScanForGuns, "MatchCount", matchCountBuffer);
-            
+
             int groupsX = Mathf.CeilToInt((caController.width - template.width) / (float)(scanStride * 8));
             int groupsY = Mathf.CeilToInt((caController.height - template.height) / (float)(scanStride * 8));
             groupsX = Mathf.Max(1, groupsX);
             groupsY = Mathf.Max(1, groupsY);
-            
+
             shader.Dispatch(kernelScanForGuns, groupsX, groupsY, 1);
-            
-            matchCountBuffer.GetData(matchCountData);
-            int matchCount = matchCountData[0];
-            
-            if (matchCount == 0) return;
-            
-            matchResultsBuffer.GetData(matchResultsData, 0, 0, Math.Min(matchCount, MAX_MATCHES));
 
-            var dedupedMatches = DeduplicateMatches(matchResultsData, matchCount);
-            var acceptedMatches = new List<MatchResult>();
-
-            foreach (MatchResult match in dedupedMatches)
+            // Both of these used to be synchronous ComputeBuffer.GetData calls,
+            // which force the CPU to wait for everything queued on the GPU to
+            // finish. It barely mattered when matches were rare - now that the
+            // alpha-channel fix makes matching trigger far more often, this
+            // was a real, frequent stall. AsyncGPUReadback defers the callback
+            // instead of blocking.
+            AsyncGPUReadback.Request(matchCountBuffer, countRequest =>
             {
-                if (match.cellCount < 5) continue;
+                if (countRequest.hasError) return;
+                int matchCount = countRequest.GetData<int>()[0];
+                if (matchCount == 0) return;
 
-                bool overlapsPlayer = false;
-                if (playerController != null && !playerController.IsDead)
+                int readCount = Math.Min(matchCount, MAX_MATCHES);
+                int stride = System.Runtime.InteropServices.Marshal.SizeOf(typeof(MatchResult));
+
+                AsyncGPUReadback.Request(matchResultsBuffer, readCount * stride, 0, resultsRequest =>
                 {
-                    for (int y = match.minY; y <= match.maxY && !overlapsPlayer; y++)
-                    {
-                        for (int x = match.minX; x <= match.maxX && !overlapsPlayer; x++)
-                        {
-                            Vector2Int pos = new Vector2Int(x, y);
-                            if (playerController.IsCellOccupied(pos))
-                                overlapsPlayer = true;
-                        }
-                    }
-                }
-                if (overlapsPlayer) continue;
+                    if (resultsRequest.hasError) return;
+                    var raw = resultsRequest.GetData<MatchResult>();
+                    MatchResult[] matches = new MatchResult[readCount];
+                    for (int i = 0; i < readCount; i++) matches[i] = raw[i];
 
-                bool overlapsEnemy = false;
-                if (enemyManager != null)
-                {
-                    for (int y = match.minY; y <= match.maxY && !overlapsEnemy; y++)
-                    {
-                        for (int x = match.minX; x <= match.maxX && !overlapsEnemy; x++)
-                        {
-                            Vector2Int pos = new Vector2Int(x, y);
-                            if (enemyManager.IsCellOccupiedByEnemy(pos))
-                                overlapsEnemy = true;
-                        }
-                    }
-                }
-                if (overlapsEnemy) continue;
-
-                acceptedMatches.Add(match);
-            }
-
-            if (acceptedMatches.Count == 0) return;
-
-            // All matches from this scan used the same template, so it's safe
-            // to capture it once in the closure rather than track it per-match.
-            caController.RequestColorData(freshSnapshot =>
-            {
-                if (freshSnapshot == null) return;
-
-                foreach (MatchResult match in acceptedMatches)
-                {
-                    bool created = CreatePickupFromMatch(match, freshSnapshot, template);
-                    if (created)
-                    {
-                        ClearCellsFromCA(match);
-                    }
-                }
+                    ProcessMatches(matches, readCount, template);
+                });
             });
         }
         catch (System.Exception e)
         {
             Debug.LogError($"GunPickupManager: Error in ScanForGunsGPU: {e.Message}");
         }
+    }
+
+    void ProcessMatches(MatchResult[] matches, int matchCount, TemplateData template)
+    {
+        var dedupedMatches = DeduplicateMatches(matches, matchCount);
+        var acceptedMatches = new List<MatchResult>();
+
+        foreach (MatchResult match in dedupedMatches)
+        {
+            if (match.cellCount < 5) continue;
+
+            bool overlapsPlayer = false;
+            if (playerController != null && !playerController.IsDead)
+            {
+                for (int y = match.minY; y <= match.maxY && !overlapsPlayer; y++)
+                    for (int x = match.minX; x <= match.maxX && !overlapsPlayer; x++)
+                        if (playerController.IsCellOccupied(new Vector2Int(x, y))) overlapsPlayer = true;
+            }
+            if (overlapsPlayer) continue;
+
+            bool overlapsEnemy = false;
+            if (enemyManager != null)
+            {
+                for (int y = match.minY; y <= match.maxY && !overlapsEnemy; y++)
+                    for (int x = match.minX; x <= match.maxX && !overlapsEnemy; x++)
+                        if (enemyManager.IsCellOccupiedByEnemy(new Vector2Int(x, y))) overlapsEnemy = true;
+            }
+            if (overlapsEnemy) continue;
+
+            acceptedMatches.Add(match);
+        }
+
+        if (acceptedMatches.Count == 0) return;
+
+        caController.RequestColorData(freshSnapshot =>
+        {
+            if (freshSnapshot == null) return;
+            foreach (MatchResult match in acceptedMatches)
+            {
+                bool created = CreatePickupFromMatch(match, freshSnapshot, template);
+                if (created) ClearCellsFromCA(match);
+            }
+        });
     }
 
     void ClearCellsFromCA(MatchResult match)
@@ -440,18 +438,20 @@ public class GunPickupManager : MonoBehaviour
         if (gunCells.Count < 5) return false;
 
         GunData data = DeriveGunStats(gunCells);
-        Sprite sprite = CreateSpriteFromCells(gunCells, data, snapshot, new Vector2Int(match.center.x, match.center.y));
 
         GameObject pickupObj = Instantiate(gunPickupPrefab);
         GunPickup pickup = pickupObj.GetComponent<GunPickup>();
-        if (pickup != null)
-        {
-            pickup.Initialize(data, sprite, new Vector2Int(match.center.x, match.center.y), caController, gunCells);
-            activePickups.Add(pickup);
-            return true;
-        }
+        if (pickup == null) return false;
 
-        return false;
+        // Null sprite placeholder - the pickup exists, has correct position,
+        // stats, and grid cells immediately; the visual sprite fades in a
+        // frame or two later once the GPU readback completes.
+        pickup.Initialize(data, null, new Vector2Int(match.center.x, match.center.y), caController, gunCells);
+        activePickups.Add(pickup);
+
+        CreateSpriteFromCellsGPU(gunCells, data, snapshot, new Vector2Int(match.center.x, match.center.y), pickup);
+
+        return true;
     }
 
     HashSet<Vector2Int> ExtractCellsFromMatch(MatchResult match, Color[] snapshot)
@@ -725,9 +725,8 @@ public class GunPickupManager : MonoBehaviour
         return true;
     }
 
-    Sprite CreateSpriteFromCells(HashSet<Vector2Int> cells, GunData data, Color[] snapshot, Vector2Int anchorPos)
+    void CreateSpriteFromCellsGPU(HashSet<Vector2Int> cells, GunData data, Color[] snapshot, Vector2Int anchorPos, GunPickup pickup)
     {
-        // Calculate bounding box
         int minX = int.MaxValue, maxX = int.MinValue;
         int minY = int.MaxValue, maxY = int.MinValue;
         foreach (var p in cells)
@@ -737,171 +736,116 @@ public class GunPickupManager : MonoBehaviour
             if (p.y < minY) minY = p.y;
             if (p.y > maxY) maxY = p.y;
         }
-        
-        // Add padding for visual effects
+
         int padding = 2;
         int w = maxX - minX + 1 + padding * 2;
         int h = maxY - minY + 1 + padding * 2;
-        
-        Texture2D tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-        tex.filterMode = FilterMode.Point;
-        tex.wrapMode = TextureWrapMode.Clamp;
-        
-        Color[] colors = new Color[w * h];
-        
-        // Base colors
-        Color baseColor = new Color(data.automatonID.x, data.automatonID.y, data.automatonID.z, 1f);
-        Color darkColor = new Color(data.automatonID.x * 0.3f, data.automatonID.y * 0.3f, data.automatonID.z * 0.3f, 1f);
-        Color lightColor = new Color(
-            Mathf.Clamp01(data.automatonID.x + 0.3f), 
-            Mathf.Clamp01(data.automatonID.y + 0.3f), 
-            Mathf.Clamp01(data.automatonID.z + 0.3f), 
-            1f
-        );
-        Color accentColor = new Color(
-            Mathf.Clamp01(data.automatonID.x + 0.5f), 
-            Mathf.Clamp01(data.automatonID.y + 0.2f), 
-            Mathf.Clamp01(data.automatonID.z + 0.5f), 
-            1f
-        );
-        
+
+        int[] filled = new int[w * h];
+        int[] partId = new int[w * h];
+        float[] cellAlpha = new float[w * h];
         int width = caController.width;
-        
-        // First pass: determine which cells are part of the gun
+
         bool[,] isGunCell = new bool[w, h];
         for (int y = 0; y < h; y++)
-        {
             for (int x = 0; x < w; x++)
-            {
-                Vector2Int pos = new Vector2Int(minX + x - padding, minY + y - padding);
-                isGunCell[x, y] = cells.Contains(pos);
-            }
-        }
-        
-        // Second pass: fill in dead cells (holes) within the gun shape
-        bool[,] filledCells = (bool[,])isGunCell.Clone();
-        
-        for (int y = 1; y < h - 1; y++)
-        {
-            for (int x = 1; x < w - 1; x++)
-            {
-                if (!isGunCell[x, y])
-                {
-                    bool surrounded = isGunCell[x-1, y] && isGunCell[x+1, y] && 
-                                    isGunCell[x, y-1] && isGunCell[x, y+1];
-                    if (surrounded)
-                    {
-                        filledCells[x, y] = true;
-                    }
-                }
-            }
-        }
-        
-        // Calculate center for part detection (unrelated to pivot - this just
-        // drives the barrel/handle/grip/sight coloring bands within the texture)
-        int centerX = w / 2;
-        int centerY = h / 2;
-        
+                isGunCell[x, y] = cells.Contains(new Vector2Int(minX + x - padding, minY + y - padding));
+
         for (int y = 0; y < h; y++)
         {
             for (int x = 0; x < w; x++)
             {
                 Vector2Int pos = new Vector2Int(minX + x - padding, minY + y - padding);
-                bool isSolid = filledCells[x, y];
-                
-                if (isSolid)
-                {
-                    float alpha = 0.85f;
-                    float state = 1f;
-                    
-                    if (snapshot != null && pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < caController.height)
-                    {
-                        int index = pos.y * width + pos.x;
-                        Color cellColor = snapshot[index];
-                        state = cellColor.a;
-                        
-                        if (state > 0.5f && state < 1.5f)
-                            alpha = 0.95f;
-                        else if (state >= 1.5f && state < caController.Decay)
-                            alpha = 0.7f - (state - 1.5f) / (caController.Decay - 1.5f) * 0.3f;
-                        else
-                            alpha = 0.5f;
-                    }
-                    
-                    float relX = (float)(x - centerX) / centerX;
-                    float relY = (float)(y - centerY) / centerY;
-                    
-                    GunPart partHere = GunPart.Body;
-                    lastGunPartMap?.TryGetValue(pos, out partHere);
+                bool solid = isGunCell[x, y];
 
-                    Color partColor = baseColor;
-                    switch (partHere)
-                    {
-                        case GunPart.Barrel: partColor = lightColor; break;
-                        case GunPart.Handle: partColor = darkColor; break;
-                        case GunPart.Grip:   partColor = accentColor; break;
-                        case GunPart.Sight:  partColor = lightColor; break;
-                        default:             partColor = baseColor; break;
-                    }
-                    
-                    bool isHorizontalLine = false;
-                    int lineSpacing = 3;
-                    for (int lineY = 0; lineY < h; lineY += lineSpacing)
-                    {
-                        if (Mathf.Abs(y - lineY) <= 1 && isGunCell[x, lineY])
-                        {
-                            isHorizontalLine = true;
-                            break;
-                        }
-                    }
-                    
-                    if (isHorizontalLine && !(relX > 0.2f && Mathf.Abs(relY) < 0.3f))
-                    {
-                        partColor = Color.Lerp(partColor, darkColor, 0.4f);
-                    }
-                    
-                    bool isSeparator = false;
-                    if (Mathf.Abs(x - centerX - 2) <= 1 && relX > 0 && relX < 0.3f && Mathf.Abs(relY) < 0.4f)
-                        isSeparator = true;
-                    if (Mathf.Abs(y - centerY + 2) <= 1 && relY < -0.1f && relY > -0.3f && Mathf.Abs(relX) < 0.3f)
-                        isSeparator = true;
-                    
-                    if (isSeparator)
-                    {
-                        partColor = darkColor;
-                    }
-                    
-                    bool isEdge = false;
-                    if (x == 0 || x == w - 1 || y == 0 || y == h - 1)
-                    {
-                        if (x > 0 && !filledCells[x-1, y]) isEdge = true;
-                        else if (x < w-1 && !filledCells[x+1, y]) isEdge = true;
-                        else if (y > 0 && !filledCells[x, y-1]) isEdge = true;
-                        else if (y < h-1 && !filledCells[x, y+1]) isEdge = true;
-                    }
-                    
-                    if (isEdge)
-                    {
-                        partColor = Color.Lerp(partColor, lightColor, 0.3f);
-                    }
-                    
-                    colors[y * w + x] = new Color(partColor.r, partColor.g, partColor.b, alpha);
-                }
-                else
+                // Fill single-cell holes surrounded on all 4 sides - same rule
+                // as before, just without the separate "filledCells" pass.
+                if (!solid && x > 0 && x < w - 1 && y > 0 && y < h - 1)
+                    solid = isGunCell[x - 1, y] && isGunCell[x + 1, y] && isGunCell[x, y - 1] && isGunCell[x, y + 1];
+
+                int idx = y * w + x;
+                filled[idx] = solid ? 1 : 0;
+
+                if (!solid) { partId[idx] = -1; cellAlpha[idx] = 0f; continue; }
+
+                GunPart part = GunPart.Body;
+                lastGunPartMap?.TryGetValue(pos, out part);
+                partId[idx] = (int)part;
+
+                float alpha = 0.85f;
+                if (snapshot != null && pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < caController.height)
                 {
-                    colors[y * w + x] = Color.clear;
+                    int index = pos.y * width + pos.x;
+                    float state = snapshot[index].a;
+                    if (state > 0.5f && state < 1.5f) alpha = 0.95f;
+                    else if (state >= 1.5f && state < caController.Decay)
+                        alpha = 0.7f - (state - 1.5f) / (caController.Decay - 1.5f) * 0.3f;
+                    else alpha = 0.5f;
                 }
+                cellAlpha[idx] = alpha;
             }
         }
-        
-        tex.SetPixels(colors);
-        tex.Apply();
+
+        ComputeBuffer filledBuf = new ComputeBuffer(w * h, sizeof(int));
+        ComputeBuffer partBuf = new ComputeBuffer(w * h, sizeof(int));
+        ComputeBuffer alphaBuf = new ComputeBuffer(w * h, sizeof(float));
+        filledBuf.SetData(filled);
+        partBuf.SetData(partId);
+        alphaBuf.SetData(cellAlpha);
+
+        RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32);
+        rt.enableRandomWrite = true;
+        rt.filterMode = FilterMode.Point;
+        rt.Create();
+
+        Vector3 mainColor = data.automatonID;
+        Color baseColor = new Color(mainColor.x, mainColor.y, mainColor.z, 1f);
+        Color darkColor = new Color(mainColor.x * 0.3f, mainColor.y * 0.3f, mainColor.z * 0.3f, 1f);
+        Color lightColor = new Color(Mathf.Clamp01(mainColor.x + 0.3f), Mathf.Clamp01(mainColor.y + 0.3f), Mathf.Clamp01(mainColor.z + 0.3f), 1f);
+        Color accentColor = new Color(Mathf.Clamp01(mainColor.x + 0.5f), Mathf.Clamp01(mainColor.y + 0.2f), Mathf.Clamp01(mainColor.z + 0.5f), 1f);
+
+        gunSpriteShader.SetBuffer(kernelGenerateSprite, "FilledCells", filledBuf);
+        gunSpriteShader.SetBuffer(kernelGenerateSprite, "PartId", partBuf);
+        gunSpriteShader.SetBuffer(kernelGenerateSprite, "CellAlpha", alphaBuf);
+        gunSpriteShader.SetTexture(kernelGenerateSprite, "SpriteOutput", rt);
+        gunSpriteShader.SetInt("SpriteWidth", w);
+        gunSpriteShader.SetInt("SpriteHeight", h);
+        gunSpriteShader.SetInt("CenterX", w / 2);
+        gunSpriteShader.SetInt("CenterY", h / 2);
+        gunSpriteShader.SetVector("BaseColor", baseColor);
+        gunSpriteShader.SetVector("DarkColor", darkColor);
+        gunSpriteShader.SetVector("LightColor", lightColor);
+        gunSpriteShader.SetVector("AccentColor", accentColor);
+
+        int groupsX = Mathf.CeilToInt(w / 8f);
+        int groupsY = Mathf.CeilToInt(h / 8f);
+        gunSpriteShader.Dispatch(kernelGenerateSprite, groupsX, groupsY, 1);
 
         float pivotX = Mathf.Clamp01((anchorPos.x - minX + padding + 0.5f) / w);
         float pivotY = Mathf.Clamp01((anchorPos.y - minY + padding + 0.5f) / h);
 
-        Sprite sprite = Sprite.Create(tex, new Rect(0, 0, w, h), new Vector2(pivotX, pivotY), 1f);
-        sprite.name = "GunPickup";
-        return sprite;
+        // Async readback - the whole point of this rewrite. This does NOT
+        // block the main thread waiting for the GPU; the callback fires once
+        // the result is actually ready, typically a frame or two later.
+        AsyncGPUReadback.Request(rt, 0, request =>
+        {
+            filledBuf.Release();
+            partBuf.Release();
+            alphaBuf.Release();
+            rt.Release();
+
+            if (request.hasError || pickup == null) return; // pickup may already be gone (picked up/destroyed)
+
+            var pixelData = request.GetData<Color32>();
+            Texture2D tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            tex.filterMode = FilterMode.Point;
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.SetPixelData(pixelData, 0);
+            tex.Apply();
+
+            Sprite sprite = Sprite.Create(tex, new Rect(0, 0, w, h), new Vector2(pivotX, pivotY), 1f);
+            sprite.name = "GunPickup";
+            pickup.ApplyGeneratedSprite(sprite);
+        });
     }
 }
